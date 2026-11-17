@@ -1,5 +1,10 @@
 # Lucy AI – ESP32 AP+STA Chatbot
 
+**Cat OS upgrade for ESP32-C3 Mini:** see [offline/C3_MINI.md](offline/C3_MINI.md)
+for the animated OLED pet, 120 clips, MAX98357A audio and one-button settings.
+Build it from `offline/` with `pio run -e lucy_c3_mini`. The web-only firmware
+below remains a separate classic ESP32 target.
+
 Target: classic ESP32 DevKit / ESP32-WROOM-32 (`esp32dev`).
 
 ## Wi-Fi setup

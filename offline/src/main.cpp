@@ -9,20 +9,25 @@
 #include <string.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ArduinoJson.h>
 
 #include "ai_api.h"
 #include "intent_api.h"
 #include "markov_api.h"
+#include "board_config.h"
+#include "companion_ui.h"
+#include "speaker.h"
+#include "battery.h"
+#include "mcp_protocol.h"
+#include "setup_page.h"
+#include "button_gesture.h"
 
-// Lucy Offline OS v0.2 — classic ESP32 DevKit V1, SSD1306 128x64.
-// Fork addition: WiFi AP web console for headless testing (mirrors the screen,
-// injects button presses, chats with the offline brain). No internet, no cloud, no STA.
-// v0.2.1: premium 1-bit UI, sans-serif (Helvetica) type system, glyph "emoji"
-// plus SHOT/SCREEN serial hooks so the screen can be verified headlessly.
+// Lucy Cat OS 0.3: ESP32-C3 Mini + retained classic ESP32 target.
+// Offline-first brain, optional server AI, OLED cat, MAX98357A, setup and MCP.
 
-static constexpr uint8_t PIN_BTN_UP = 16;
-static constexpr uint8_t PIN_BTN_SELECT = 17;
-static constexpr uint8_t PIN_BTN_BACK = 4;
+static constexpr int8_t PIN_BTN_UP = LUCY_BUTTON_UP;
+static constexpr int8_t PIN_BTN_SELECT = LUCY_BUTTON;
+static constexpr int8_t PIN_BTN_BACK = LUCY_BUTTON_BACK;
 static constexpr uint8_t PIN_SD_CS = 13; // avoids GPIO5 boot-strapping interaction
 static constexpr uint32_t DEBOUNCE_MS = 35;
 static constexpr uint32_t IDLE_RETURN_MS = 15000;
@@ -35,11 +40,13 @@ enum class Screen : uint8_t { HOME, MENU, CLOCK, COMPANION, GAMES, SNAKE, SETTIN
 enum class Language : uint8_t { ENGLISH, HINDI, MARATHI };
 
 struct Button {
-  uint8_t pin;
+  explicit Button(int8_t gpio) : pin(gpio) {}
+  int8_t pin;
   bool stable = HIGH;
   bool lastRead = HIGH;
   uint32_t changedAt = 0;
   bool pressed = false;
+  uint32_t downAt = 0;
 };
 
 Button btnUp{PIN_BTN_UP}, btnSelect{PIN_BTN_SELECT}, btnBack{PIN_BTN_BACK};
@@ -49,6 +56,22 @@ bool aiEnabled = false;
 bool rtcReady = false;
 bool sdReady = false;
 bool soundEnabled = false;
+uint8_t brightness = 70;
+uint8_t volume = 50;
+uint8_t settingsIndex = 0;
+bool settingDetail = false;
+bool wifiEnabled = true;
+bool apEnabled = true;
+String apSsid = "Lucy-Setup";
+String apPass;
+bool mcpEnabled = false;
+String mcpToken;
+uint32_t networkApplyAt = 0;
+cat::Player catPlayer;
+Battery battery;
+static void applyNetwork();
+void handleRtcSetCommand(const char *line);
+void showMenu();
 uint8_t menuIndex = 0;
 uint8_t gameIndex = 0;
 uint32_t lastInteraction = 0;
@@ -60,7 +83,7 @@ int8_t snakeDx = 1, snakeDy = 0;
 uint8_t foodX = 8, foodY = 4;
 uint32_t lastSnakeStep = 0;
 bool snakeOver = false;
-char serialLine[96];
+char serialLine[256];
 size_t serialLength = 0;
 
 // Optional station (home Wi-Fi / hotspot) credentials, stored in NVS.
@@ -462,6 +485,7 @@ void setChat(const char *user, const char *reply) {
 }
 
 void saveSettings() {
+  aiSetLanguage(static_cast<uint8_t>(language));
   prefs.putUChar("lang", static_cast<uint8_t>(language));
   prefs.putBool("sound", soundEnabled);
   prefs.putBool("aiOn", aiEnabled);
@@ -474,6 +498,16 @@ void saveSettings() {
   prefs.putBool("aiIns", aiInsecure());
   prefs.putString("wifiSsid", wifiSsid);
   prefs.putString("wifiPass", wifiPass);
+  prefs.putBool("wifiOn", wifiEnabled);
+  prefs.putBool("apOn", apEnabled);
+  prefs.putString("apSsid", apSsid);
+  prefs.putString("apPass", apPass);
+  prefs.putUChar("bright", brightness);
+  prefs.putUChar("volume", volume);
+  prefs.putBool("mcpOn", mcpEnabled);
+  prefs.putString("mcpTok", mcpToken);
+  display.setContrast(brightness * 255 / 100);
+  speakerVolume(volume);
 }
 
 void loadSettings() {
@@ -498,9 +532,21 @@ void loadSettings() {
 
   wifiSsid = prefs.getString("wifiSsid", "");
   wifiPass = prefs.getString("wifiPass", "");
+  wifiEnabled = prefs.getBool("wifiOn", wifiSsid.length() > 0);
+  apEnabled = prefs.getBool("apOn", true);
+  apSsid = prefs.getString("apSsid", "Lucy-Setup");
+  apPass = prefs.getString("apPass", "");
+  brightness = constrain(prefs.getUChar("bright", 70), 10, 100);
+  volume = constrain(prefs.getUChar("volume", soundEnabled ? 50 : 0), 0, 100);
+  // A fresh C3 build with an amplifier starts at a moderate volume.
+  if (!prefs.isKey("volume") && !prefs.isKey("sound")) volume = 50;
+  soundEnabled = volume > 0;
+  mcpToken = prefs.getString("mcpTok", "");
+  mcpEnabled = prefs.getBool("mcpOn", false) && mcpToken.length() >= 24;
 }
 
 void pollButton(Button &button) {
+  if (button.pin < 0) return;
   bool reading = digitalRead(button.pin);
   button.pressed = false;
   if (reading != button.lastRead) {
@@ -510,7 +556,16 @@ void pollButton(Button &button) {
   if ((millis() - button.changedAt) >= DEBOUNCE_MS && reading != button.stable) {
     button.stable = reading;
     if (button.stable == LOW) {
-      button.pressed = true;
+      button.downAt = millis();
+      if (PIN_BTN_UP >= 0) button.pressed = true;
+      lastInteraction = millis();
+    } else if (PIN_BTN_UP < 0) {
+      const uint32_t held = millis() - button.downAt;
+      switch (buttonGesture(held, screen == Screen::HOME)) {
+        case Gesture::BACK: btnBack.pressed = true; break;
+        case Gesture::SELECT: button.pressed = true; break;
+        case Gesture::NEXT: btnUp.pressed = true; break;
+      }
       lastInteraction = millis();
     }
   }
@@ -524,33 +579,25 @@ bool take(Button &button) {
 
 // Boot: logo, wordmark and a progress bar that tracks real init steps.
 void showBoot(uint8_t step, uint8_t total) {
-  display.clearBuffer();
-  display.drawRFrame(0, 0, 128, 64, 5);
-  drawFace(64, 17, MOOD_HAPPY, false);
-  display.setFont(FONT_BODY);
-  drawSpacedCentered(44, "LUCY", 3);
-  display.setFont(FONT_META);
-  drawCentered("OFFLINE COMPANION", 52);
-  display.drawRFrame(34, 55, 60, 5, 2);
-  const int16_t filled = static_cast<int16_t>((56 * step) / total);
-  if (filled > 0) display.drawBox(36, 57, filled, 1);
+  companion_ui::boot(display, total ? step * 5 / total : 0, millis(), FONT_META);
   display.sendBuffer();
 }
 
 void showHome() {
-  display.clearBuffer();
-  drawStatusBar(true, true);
-  drawDottedHLine(0, 11, 128);
-  const bool blink = (millis() % 4700U) < 140U;
-  drawFace(64, 24, MOOD_HAPPY, blink);
-  display.setFont(FONT_META);
-  const char *state = "LOCAL BRAIN";
-  if (aiEnabled) state = (WiFi.status() == WL_CONNECTED) ? "AI ONLINE" : "AI READY";
-  drawCentered(state, 51);
-  drawDottedHLine(0, 53, 128);
-  display.drawStr(3, 62, "UP chat");
-  display.drawStr(74, 62, "SEL apps");
+  companion_ui::home(display, catPlayer.clip, millis() - catPlayer.started,
+                     battery.percent, WiFi.status() == WL_CONNECTED,
+                     WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : -100, apEnabled);
   display.sendBuffer();
+}
+
+void serviceCompanion() {
+  speakerTick();
+  if (catPlayer.tick(millis()) && screen == Screen::HOME)
+    speakerCat(catPlayer.clip / cat::VARIANTS, catPlayer.clip % cat::VARIANTS);
+  if (screen == Screen::HOME && millis() - lastFrame >= 80) {
+    lastFrame = millis();
+    showHome();
+  }
 }
 
 void showMenu() {
@@ -653,37 +700,123 @@ void showCompanion(const char *message = nullptr) {
   display.sendBuffer();
 }
 
+static const char *const MODEL_CHOICES[] = {"Offline brain", "Saved model", "qwen2.5:3b", "qwen2.5:7b", "llama3.2:3b"};
+uint8_t modelChoice = 1;
+String savedModel;
+
 void showSettings() {
+  if (!settingDetail) {
+    companion_ui::settings(display, settingsIndex, FONT_META, FONT_TITLE, PIN_BTN_UP < 0);
+    display.sendBuffer();
+    return;
+  }
   display.clearBuffer();
-  drawHeader("SETTINGS");
-  char value[24];
-  // Three rows, no interior rules: the air is what makes a 1-bit list readable.
-  display.setFont(FONT_BODY);
-  display.drawStr(4, 22, "Language");
+  display.setFont(FONT_TITLE);
+  drawCentered(companion_ui::SETTINGS[settingsIndex], 10);
   display.setFont(FONT_META);
-  snprintf(value, sizeof(value), "%s", languageName(language));
-  drawStrFit(122 - display.getStrWidth(value), 21, value, 120);
-
-  display.setFont(FONT_BODY);
-  display.drawStr(4, 35, "Sound");
-  drawToggle(100, 27, 24, 10, soundEnabled);
-
-  display.setFont(FONT_BODY);
-  display.drawStr(4, 48, "AI bridge");
-  drawToggle(100, 40, 24, 10, aiEnabled);
-  drawFooter("UP lang SEL sound", "BACK");
+  char value[40];
+  switch (settingsIndex) {
+    case 0:
+      snprintf(value, sizeof(value), "%u%%", brightness);
+      drawCentered(value, 30);
+      display.drawRFrame(20, 36, 88, 7, 3);
+      display.drawBox(23, 38, brightness * 82 / 100, 3);
+      break;
+    case 1:
+      drawCentered(languageName(language), 29);
+      drawCentered("Replies use Latin letters", 45);
+      break;
+    case 2:
+      snprintf(value, sizeof(value), "%u%%", volume);
+      drawCentered(value, 28);
+      drawCentered(speakerReady() ? "MAX98357A speaker" : "No audio driver", 43);
+      break;
+    case 3:
+      drawCentered(wifiEnabled ? "Router: enabled" : "Router: disabled", 26);
+      drawStrFit(4, 39, wifiSsid.length() ? wifiSsid.c_str() : "No network saved", 120);
+      drawCentered("Edit: /settings on phone", 51);
+      break;
+    case 4:
+      drawCentered(apEnabled ? "Access point: on" : "Access point: off", 26);
+      drawStrFit(4, 39, apSsid.c_str(), 120);
+      drawCentered("192.168.4.1/settings", 51);
+      break;
+    case 5:
+      drawStrFit(4, 27, aiEnabled ? aiModel() : "Offline brain", 120);
+      drawCentered("Models run on server", 40);
+      drawCentered("Custom: phone /settings", 51);
+      break;
+    case 6:
+      drawCentered(mcpEnabled ? "MCP server: on" : "MCP server: off", 25);
+      drawCentered(mcpToken.length() >= 24 ? "Read-only tools at /mcp" : "Set token: phone /settings", 39);
+      drawCentered("Status + animation list", 51);
+      break;
+  }
+  drawFooter(PIN_BTN_UP < 0 ? "Tap change" : "UP change", PIN_BTN_UP < 0 ? "Hold save" : "SEL save");
   display.sendBuffer();
 }
 
 void showAbout() {
   display.clearBuffer();
-  drawHeader("ABOUT");
-  drawFace(64, 22, MOOD_HAPPY, false);
-  display.setFont(FONT_TITLE);
-  drawSpacedCentered(50, "LUCY OS", 2);
+  drawHeader("LUCY OS " LUCY_VERSION);
   display.setFont(FONT_META);
-  drawCentered("v0.2.1 ESP32-D0WD-V3", 62);
+  drawCentered(LUCY_BOARD_NAME, 24);
+  char value[48];
+  snprintf(value, sizeof(value), "120 clips | heap %uK", ESP.getFreeHeap() / 1024);
+  drawCentered(value, 36);
+  snprintf(value, sizeof(value), "Battery: %s", battery.percent < 0 ? "sensor not set" : "voltage estimate");
+  drawCentered(value, 48);
+  drawFooter(nullptr, PIN_BTN_UP < 0 ? "Hold 2s back" : "BACK");
   display.sendBuffer();
+}
+
+void handleSettingsButtons() {
+  if (take(btnBack)) {
+    if (settingDetail) {
+      saveSettings();
+      if (settingsIndex == 3 || settingsIndex == 4) networkApplyAt = millis() + 500;
+      settingDetail = false; showSettings();
+    }
+    else { screen = Screen::HOME; showHome(); }
+    return;
+  }
+  if (take(btnUp)) {
+    if (!settingDetail) settingsIndex = (settingsIndex + 1) % companion_ui::SETTINGS_COUNT;
+    else {
+      switch (settingsIndex) {
+        case 0: brightness = brightness >= 100 ? 10 : brightness + 10; break;
+        case 1: language = static_cast<Language>((static_cast<uint8_t>(language) + 1) % 3); break;
+        case 2:
+          volume = volume >= 100 ? 0 : volume + 10;
+          soundEnabled = volume > 0;
+          speakerVolume(volume);
+          speakerCat(cat::CHIRP, 0);
+          break;
+        case 3: wifiEnabled = !wifiEnabled; break;
+        case 4: apEnabled = !apEnabled; break;
+        case 5:
+          modelChoice = (modelChoice + 1) % 5;
+          aiEnabled = modelChoice != 0;
+          if (aiEnabled) aiSetModel(modelChoice == 1 ? savedModel.c_str() : MODEL_CHOICES[modelChoice]);
+          break;
+        case 6: if (mcpToken.length() >= 24) mcpEnabled = !mcpEnabled; break;
+      }
+      // Commit on save/back instead of writing flash on each tap.
+      display.setContrast(brightness * 255 / 100);
+    }
+    showSettings();
+  }
+  if (take(btnSelect)) {
+    if (settingDetail) {
+      saveSettings();
+      if (settingsIndex == 3 || settingsIndex == 4) networkApplyAt = millis() + 500;
+      settingDetail = false;
+    }
+    else if (settingsIndex == 7) { screen = Screen::ABOUT; showAbout(); return; }
+    else if (settingsIndex == 8) { screen = Screen::MENU; menuIndex = 0; showMenu(); return; }
+    else settingDetail = true;
+    showSettings();
+  }
 }
 
 void showGames() {
@@ -912,6 +1045,7 @@ const char *offlineReply(const char *input) {
 }
 
 void handleRtcSetCommand(const char *line);
+void showMenu();
 
 static void handleLangCommand(const char *arg) {
   if (strncmp(arg, "en", 2) == 0) language = Language::ENGLISH;
@@ -1056,12 +1190,11 @@ void handleWifiCommand(const char *line) {
     return;
   }
   if (strcmp(line, "WIFI off") == 0) {
+    wifiEnabled = false;
     wifiSsid = "";
     wifiPass = "";
     saveSettings();
-    WiFi.disconnect(true, false);
-    WiFi.mode(WIFI_AP);
-    if (WiFi.softAPIP() == INADDR_NONE) WiFi.softAP("Lucy-Setup");
+    applyNetwork();
     Serial.println("WiFi: station disabled, AP-only again");
     return;
   }
@@ -1074,11 +1207,10 @@ void handleWifiCommand(const char *line) {
   }
   wifiSsid = ssid;
   wifiPass = pass;
+  wifiEnabled = true;
   saveSettings();
   // AP + STA: the web console stays reachable on 192.168.4.1.
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+  applyNetwork();
   wifiLastKick = millis();
   wifiLastCheck = millis();
   Serial.print("WiFi: joining '");
@@ -1145,6 +1277,21 @@ void handleSerialConsole() {
           markovSaveNow();
         } else if (strcmp(serialLine, "brain reset") == 0) {
           markovReset();
+        } else if (strncmp(serialLine, "CAT ", 4) == 0) {
+          if (strcmp(serialLine + 4, "auto") == 0) {
+            catPlayer.automatic = true; catPlayer.started = millis();
+          } else if (strcmp(serialLine + 4, "list") == 0) {
+            for (int id = 0; id < cat::CLIPS; id++) {
+              Serial.printf("%d: %s / %s\n", id, cat::name(id), cat::VARIANT_NAMES[id % 5]);
+            }
+          } else {
+            char *end = nullptr;
+            const long id = strtol(serialLine + 4, &end, 10);
+            if (end != serialLine + 4 && !*end && id >= 0 && id < cat::CLIPS) {
+              catPlayer.select(id, millis()); screen = Screen::HOME; showHome();
+              Serial.printf("CAT %ld: %s\n", id, cat::name(id));
+            } else Serial.println("CAT auto|list|0..119");
+          }
         } else if (strncmp(serialLine, "MEAS ", 5) == 0) {
           // Font-metric probe: proportional widths are data-dependent, so ask
           // the panel instead of guessing layout constants.
@@ -1186,7 +1333,7 @@ void openMenuItem() {
     case 0: screen = Screen::COMPANION; showCompanion(); break;
     case 1: screen = Screen::CLOCK; showClock(); break;
     case 2: screen = Screen::GAMES; gameIndex = 0; showGames(); break;
-    case 3: screen = Screen::SETTINGS; showSettings(); break;
+    case 3: screen = Screen::SETTINGS; settingDetail = false; showSettings(); break;
     default: screen = Screen::ABOUT; showAbout(); break;
   }
 }
@@ -1194,8 +1341,7 @@ void openMenuItem() {
 // ---------------------------------------------------------------------------
 // Web console (headless testing): WiFi softAP + framebuffer mirror.
 // Open "Lucy-Setup" WiFi AP, then http://192.168.4.1 in a browser.
-// Plain HTTP, no auth (AP is open and test-scoped). No internet, no cloud, no STA,
-// no MCP — serial console and physical buttons behave as before.
+// Settings are AP-local. MCP is optional and uses its own Bearer token.
 // ---------------------------------------------------------------------------
 static WebServer webServer(80);
 
@@ -1216,7 +1362,7 @@ h1{font-size:1.05rem;letter-spacing:.18em;color:#7de2ff;margin:.6em 0 .8em}
 #chatform button{background:#1e4b58;color:#8ff0ff;border:0;border-radius:8px;padding:10px 18px;font-size:16px;cursor:pointer}
 .hint{color:#4a6a78;font-size:.72rem;margin-top:8px}
 </style></head><body>
-<h1>LUCY OS &middot; WEB CONSOLE</h1>
+<h1>LUCY OS &middot; CAT COMPANION</h1><p><a href="/settings" style="color:#8ff0ff">Settings</a></p>
 <canvas id="screen" width="128" height="64"></canvas>
 <div class="controls">
   <button id="up">&#9650; UP</button>
@@ -1240,7 +1386,7 @@ form.onsubmit=function(e){e.preventDefault();var t=msg.value.trim();if(!t)return
 </script>
 </body></html>)HTML";
 
-static void handleWebRoot() { webServer.send(200, "text/html; charset=utf-8", WEB_PAGE); }
+static void handleWebRoot() { webServer.send_P(200, "text/html; charset=utf-8", WEB_PAGE); }
 
 static void handleWebFrame() {
   // U8g2 full-buffer ("F") mode keeps the whole 128x64 mono framebuffer in RAM (8 pages x 128 cols).
@@ -1264,6 +1410,7 @@ static void handleWebSay() {
   String text = webServer.arg("text");
   text.trim();
   if (text.isEmpty()) { webServer.send(400, "text/plain", "empty"); return; }
+  if (text.length() > 160) { webServer.send(400, "text/plain", "Use at most 160 characters."); return; }
   markovLearn(text.c_str()); // same learning path as the serial console
   const char *reply = offlineReply(text.c_str());
   setChat(text.c_str(), reply);
@@ -1271,37 +1418,191 @@ static void handleWebSay() {
   if (screen == Screen::COMPANION) showCompanion();
 }
 
+static void applyNetwork() {
+  const bool sta = wifiEnabled && wifiSsid.length();
+  WiFi.mode(apEnabled ? (sta ? WIFI_AP_STA : WIFI_AP) : (sta ? WIFI_STA : WIFI_OFF));
+  if (apEnabled) WiFi.softAP(apSsid.c_str(), apPass.length() ? apPass.c_str() : nullptr);
+  if (sta) {
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+    wifiLastKick = millis();
+  } else WiFi.disconnect(false, false);
+}
+
+static bool localOrigin() {
+  const String origin = webServer.header("Origin");
+  if (!origin.length()) return true; // native clients do not send Origin
+  return origin == "http://" + WiFi.softAPIP().toString() ||
+         (WiFi.status() == WL_CONNECTED && origin == "http://" + WiFi.localIP().toString());
+}
+static bool setupAccess(bool mutation = false) {
+  // Setup is physically local to Lucy's own AP, including when STA is online.
+  if (!apEnabled || webServer.client().localIP() != WiFi.softAPIP() || !localOrigin() ||
+      (mutation && webServer.header("X-Lucy-Setup") != "1")) {
+    webServer.send(403, "text/plain", "Join Lucy's setup access point to change settings.");
+    return false;
+  }
+  webServer.sendHeader("Cache-Control", "no-store");
+  return true;
+}
+static void handleSettingsGet() {
+  if (!setupAccess()) return;
+  StaticJsonDocument<1024> doc;
+  doc["brightness"] = brightness;
+  doc["volume"] = volume;
+  doc["language"] = static_cast<uint8_t>(language);
+  doc["wifi_enabled"] = wifiEnabled;
+  doc["wifi_ssid"] = wifiSsid;
+  doc["ap_enabled"] = apEnabled;
+  doc["ap_ssid"] = apSsid;
+  doc["ap_open"] = apPass.isEmpty();
+  doc["ai_enabled"] = aiEnabled;
+  doc["ai_url"] = aiUrl();
+  doc["ai_model"] = aiModel();
+  doc["mcp_enabled"] = mcpEnabled;
+  String json;
+  serializeJson(doc, json);
+  webServer.send(200, "application/json", json);
+}
+static bool integerField(const char *name, int lo, int hi, int &out) {
+  const String value = webServer.arg(name);
+  if (!value.length()) return false;
+  for (size_t i = 0; i < value.length(); i++) if (!isDigit(value[i])) return false;
+  out = value.toInt();
+  return out >= lo && out <= hi;
+}
+static void handleSettingsSave() {
+  if (!setupAccess(true)) return;
+  auto invalid = [](const char *message) { webServer.send(400, "text/plain", message); };
+  int nextBrightness, nextVolume, nextLanguage;
+  if (!integerField("brightness", 10, 100, nextBrightness) ||
+      !integerField("volume", 0, 100, nextVolume) || !integerField("language", 0, 2, nextLanguage)) {
+    invalid("Check brightness, volume and language."); return;
+  }
+  String nextSsid = webServer.arg("wifi_ssid");
+  String nextPass = webServer.arg("wifi_password");
+  String nextAp = webServer.arg("ap_ssid");
+  String nextApPass = webServer.arg("ap_password");
+  String nextUrl = webServer.arg("ai_url");
+  String nextModel = webServer.arg("ai_model");
+  String nextToken = webServer.arg("ai_token");
+  String nextMcp = webServer.arg("mcp_token");
+  const bool nextWifiOn = webServer.arg("wifi_enabled") == "1";
+  const bool nextApOn = webServer.arg("ap_enabled") == "1";
+  const bool nextMcpOn = webServer.arg("mcp_enabled") == "1";
+  if (nextSsid.length() > 32 || nextAp.length() < 1 || nextAp.length() > 32 ||
+      nextPass.length() > 64 || nextApPass.length() > 63 ||
+      (nextApPass.length() > 0 && nextApPass.length() < 8) ||
+      (nextWifiOn && !nextSsid.length())) { invalid("Check network names and password lengths."); return; }
+  if ((!nextUrl.startsWith("http://") && !nextUrl.startsWith("https://")) ||
+      nextUrl.length() > 95 || nextUrl.indexOf('@') >= 0 || nextUrl.indexOf('?') >= 0 ||
+      nextUrl.indexOf('#') >= 0 || nextUrl.indexOf(' ') >= 0 ||
+      nextModel.length() < 1 || nextModel.length() > 39 || nextToken.length() > 95) {
+    invalid("Use an HTTP(S) model-server base URL and a model name (1-39 characters)."); return;
+  }
+  if (nextMcp.length() > 95 || (nextMcp.length() && nextMcp.length() < 24) ||
+      (nextMcpOn && !nextMcp.length() && mcpToken.length() < 24)) {
+    invalid("MCP needs a Bearer token of 24-95 characters."); return;
+  }
+  for (size_t i = 0; i < nextMcp.length(); i++) {
+    if (nextMcp[i] <= 32 || nextMcp[i] >= 127) { invalid("Use visible non-space ASCII in the MCP token."); return; }
+  }
+  // Validate everything before changing any state. Blank secrets preserve NVS.
+  if (!nextPass.length()) nextPass = wifiPass;
+  if (webServer.arg("wifi_open") == "1") nextPass = "";
+  if (!nextApPass.length()) nextApPass = apPass;
+  if (webServer.arg("ap_open") == "1") nextApPass = "";
+  const bool networkChanged = nextSsid != wifiSsid || nextPass != wifiPass ||
+      nextAp != apSsid || nextApPass != apPass || nextApOn != apEnabled || nextWifiOn != wifiEnabled;
+  brightness = nextBrightness;
+  volume = nextVolume;
+  soundEnabled = volume > 0;
+  language = static_cast<Language>(nextLanguage);
+  wifiSsid = nextSsid; wifiPass = nextPass; wifiEnabled = nextWifiOn;
+  apSsid = nextAp; apPass = nextApPass; apEnabled = nextApOn;
+  aiEnabled = webServer.arg("ai_enabled") == "1";
+  aiSetUrl(nextUrl.c_str()); aiSetModel(nextModel.c_str());
+  savedModel = nextModel; modelChoice = aiEnabled ? 1 : 0;
+  if (nextToken.length()) aiSetToken(nextToken.c_str());
+  if (nextMcp.length()) mcpToken = nextMcp;
+  mcpEnabled = nextMcpOn;
+  saveSettings();
+  webServer.send(200, "text/plain", networkChanged ? "Saved. Rejoin Lucy's access point if the network changes." : "Settings saved.");
+  if (networkChanged) networkApplyAt = millis() + 700;
+  if (screen == Screen::SETTINGS) showSettings();
+}
+static void handleMcp() {
+  if (!mcpEnabled) { webServer.send(404, "text/plain", "MCP disabled"); return; }
+  if (!localOrigin()) { webServer.send(403, "text/plain", "Origin rejected"); return; }
+  const String authorization = webServer.header("Authorization");
+  // Fixed-work comparison; do not log token or request body.
+  const String expected = "Bearer " + mcpToken;
+  unsigned difference = authorization.length() ^ expected.length();
+  for (size_t i = 0; i < expected.length(); i++) difference |= expected[i] ^ (i < authorization.length() ? authorization[i] : 0);
+  if (difference || mcpToken.length() < 24) { webServer.send(401, "text/plain", "Bearer token required"); return; }
+  if (webServer.method() != HTTP_POST) {
+    webServer.sendHeader("Allow", "POST");
+    webServer.send(405, "text/plain", "No SSE stream or sessions"); return;
+  }
+  const String protocol = webServer.header("MCP-Protocol-Version");
+  if (protocol.length() && protocol != "2025-06-18" && protocol != "2025-03-26") {
+    webServer.send(400, "text/plain", "Unsupported MCP protocol version"); return;
+  }
+  if (!webServer.header("Content-Type").startsWith("application/json")) {
+    webServer.send(415, "text/plain", "Use application/json"); return;
+  }
+  static uint32_t rateStart = 0;
+  static uint8_t count = 0;
+  if (millis() - rateStart > 60000) { rateStart = millis(); count = 0; }
+  if (count >= 30) { webServer.send(429, "text/plain", "Try again later"); return; }
+  count++;
+  if (webServer.arg("plain").length() > 1536) { webServer.send(413, "text/plain", "Request too large"); return; }
+  // Heap documents keep the C3 loop stack small, with fixed maximum capacity.
+  DynamicJsonDocument in(2048), out(3072);
+  const auto parsed = deserializeJson(in, webServer.arg("plain"), DeserializationOption::NestingLimit(8));
+  int code = 200;
+  if (parsed) {
+    out["jsonrpc"] = "2.0"; out["id"] = nullptr;
+    lucy_mcp::error(out, -32700, "Parse error");
+  } else {
+    char status[240];
+    snprintf(status, sizeof(status), "Lucy OS %s; %s; uptime %lus; heap %u; battery %d%% (%lumV, -1=unknown); Wi-Fi %s; clip %u/120 %s",
+        LUCY_VERSION, LUCY_BOARD_NAME, millis() / 1000UL, ESP.getFreeHeap(), battery.percent,
+        (unsigned long)battery.millivolts, WiFi.status() == WL_CONNECTED ? "connected" : "offline",
+        catPlayer.clip, cat::name(catPlayer.clip));
+    code = lucy_mcp::respond(in.as<JsonVariantConst>(), out, status);
+  }
+  if (code == 202) { webServer.send(202, "text/plain", ""); return; }
+  if (out.overflowed()) { webServer.send(503, "text/plain", "Memory busy"); return; }
+  String json;
+  serializeJson(out, json);
+  webServer.send(200, "application/json", json);
+}
+
 static void webConsoleBegin() {
   WiFi.persistent(false);
-  // AP + STA when a home network is configured: the web console keeps working
-  // on 192.168.4.1 while Lucy reaches the internet.
-  WiFi.mode(wifiSsid.length() ? WIFI_AP_STA : WIFI_AP);
-  if (wifiSsid.length()) {
-    WiFi.setSleep(false); // lower latency for chat
-    WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
-    Serial.print("WiFi: joining '");
-    Serial.print(wifiSsid);
-    Serial.println("' (Lucy-Setup stays up)");
-  }
-
-  if (!WiFi.softAP("Lucy-Setup")) {
-    Serial.println("WARNING: web console AP failed to start");
-    return;
-  }
+  applyNetwork();
+  static const char *headers[] = {"Origin", "Authorization", "Content-Type", "MCP-Protocol-Version", "X-Lucy-Setup"};
+  webServer.collectHeaders(headers, 5);
   webServer.on("/", HTTP_GET, handleWebRoot);
+  webServer.on("/settings", HTTP_GET, []() {
+    if (setupAccess()) webServer.send_P(200, "text/html; charset=utf-8", SETUP_PAGE);
+  });
+  webServer.on("/api/settings", HTTP_GET, handleSettingsGet);
+  webServer.on("/api/settings", HTTP_POST, handleSettingsSave);
+  webServer.on("/mcp", HTTP_ANY, handleMcp);
   webServer.on("/frame.bin", HTTP_GET, handleWebFrame);
   webServer.on("/press", HTTP_GET, handleWebPress);
   webServer.on("/say", HTTP_ANY, handleWebSay);
   webServer.begin();
-  Serial.print("Web console AP 'Lucy-Setup': http://");
-  Serial.println(WiFi.softAPIP());
+  Serial.println("Lucy web console: http://192.168.4.1 (when AP enabled)");
 }
 
 static void webConsoleLoop() { webServer.handleClient(); }
 
 // Non-blocking station supervisor: reports state changes and nudges a dead link.
 static void wifiLoop() {
-  if (wifiSsid.length() == 0) return;
+  if (!wifiEnabled || wifiSsid.length() == 0) return;
   if (millis() - wifiLastCheck < 5000) return;
   wifiLastCheck = millis();
 
@@ -1329,23 +1630,30 @@ void setup() {
   Serial.begin(115200);
   delay(150);
   Serial.println();
-  Serial.println("Lucy Offline OS v0.2.1 booting — no internet / no cloud AI");
+  Serial.println("Lucy OS " LUCY_VERSION " booting: " LUCY_BOARD_NAME);
 
-  pinMode(PIN_BTN_UP, INPUT_PULLUP);
+  if (PIN_BTN_UP >= 0) pinMode(PIN_BTN_UP, INPUT_PULLUP);
   pinMode(PIN_BTN_SELECT, INPUT_PULLUP);
-  pinMode(PIN_BTN_BACK, INPUT_PULLUP);
+  if (PIN_BTN_BACK >= 0) pinMode(PIN_BTN_BACK, INPUT_PULLUP);
   lastInteraction = millis();
 
-  Wire.begin(21, 22);
+  Wire.begin(LUCY_SDA, LUCY_SCL);
+  display.setBusClock(400000);
   display.begin();
   display.setContrast(180);
-  for (uint8_t step = 0; step <= 4; step++) {
-    showBoot(step, 4);
-    delay(110);
-  }
+  const uint32_t bootAt = millis();
+  showBoot(0, 5);
 
   prefs.begin("lucy-os", false);
   loadSettings();
+  aiSetLanguage(static_cast<uint8_t>(language));
+  savedModel = aiModel();
+  modelChoice = aiEnabled ? 1 : 0;
+  display.setContrast(brightness * 255 / 100);
+  speakerBegin(volume);
+  battery.begin();
+  speakerGreeting();
+  showBoot(1, 5);
 
   rtcReady = rtc.begin();
   if (rtcReady && rtc.lostPower()) {
@@ -1353,6 +1661,7 @@ void setup() {
     Serial.println("RTC lost power; set it using: SETTIME YYYY-MM-DD HH:MM:SS");
   }
 
+  #if LUCY_SD_ENABLED
   SPI.begin(18, 19, 23, PIN_SD_CS);
   sdReady = SD.begin(PIN_SD_CS);
   if (sdReady) {
@@ -1361,8 +1670,13 @@ void setup() {
     if (info) { info.println("Lucy Offline OS boot"); info.close(); }
   }
 
+  #endif
+  showBoot(2, 5);
   randomSeed(esp_random());
+  catPlayer.begin(cat::WAVE * cat::VARIANTS, millis());
+  aiSetIdleHook(serviceCompanion);
   markovBegin();
+  showBoot(3, 5);
   Serial.println("Serial console ready. Type: hello, how are you, joke, time, name.");
   Serial.println("Self-learning words: 'make words' to generate, 'brain stats|save|reset' to manage.");
   Serial.println("RTC setup command: SETTIME YYYY-MM-DD HH:MM:SS");
@@ -1384,7 +1698,15 @@ void setup() {
   Serial.println("AI: AI | AI on|off | AI url <http(s)://...> | AI host <ip> [port]");
   Serial.println("    AI token <secret> | AI insecure on|off | AI model <name>");
   Serial.println("WiFi: WIFI <ssid> [password] | WIFI status | WIFI off   (2.4 GHz only)");
+  // Keep the greeting visible/audible while completing actual initialization.
+  while (millis() - bootAt < 4300 || speakerBusy()) {
+    speakerTick();
+    if (millis() - lastFrame >= 80) { lastFrame = millis(); showBoot(5, 5); }
+    delay(2);
+  }
+  catPlayer.started = millis();
   screen = Screen::HOME;
+  lastInteraction = millis();
   showHome();
 }
 
@@ -1408,7 +1730,11 @@ void loop() {
   handleSerialConsole();
   webConsoleLoop();
   wifiLoop();
-  markovTick(millis());
+  serviceCompanion();
+  battery.tick(millis());
+  if (networkApplyAt && int32_t(millis() - networkApplyAt) >= 0) { networkApplyAt = 0; applyNetwork(); }
+  // Flash writes are deferred until the speaker is idle.
+  if (!speakerBusy()) markovTick(millis());
 
   // Serial time-setting is kept separate from chat parsing.
   if (serialLength == 0 && Serial.available() == 0) {
@@ -1416,9 +1742,8 @@ void loop() {
   }
 
   if (screen == Screen::HOME) {
-    if (take(btnSelect)) { screen = Screen::MENU; menuIndex = 0; showMenu(); }
-    else if (take(btnUp)) { screen = Screen::COMPANION; showCompanion(); }
-    else if (millis() - lastFrame > 250) { lastFrame = millis(); showHome(); }
+    if (take(btnSelect) || take(btnUp)) { screen = Screen::SETTINGS; settingsIndex = 0; settingDetail = false; showSettings(); }
+    else if (millis() - lastFrame >= 80) { lastFrame = millis(); showHome(); }
   } else if (screen == Screen::MENU) {
     if (take(btnUp)) { menuIndex = (menuIndex + 1) % MENU_COUNT; showMenu(); }
     if (take(btnSelect)) openMenuItem();
@@ -1444,14 +1769,16 @@ void loop() {
     updateSnake();
     if (millis() - lastFrame > 80) { lastFrame = millis(); showSnake(); }
   } else if (screen == Screen::SETTINGS) {
-    if (take(btnUp)) { language = static_cast<Language>((static_cast<uint8_t>(language) + 1) % 3); saveSettings(); showSettings(); }
-    if (take(btnSelect)) { soundEnabled = !soundEnabled; saveSettings(); showSettings(); }
-    if (take(btnBack)) { screen = Screen::HOME; showHome(); }
+    handleSettingsButtons();
   } else if (screen == Screen::ABOUT) {
-    if (take(btnBack) || take(btnSelect)) { screen = Screen::MENU; showMenu(); }
+    if (take(btnBack) || take(btnSelect)) { screen = Screen::SETTINGS; settingDetail = false; showSettings(); }
   }
 
   if (millis() - lastInteraction > IDLE_RETURN_MS && screen != Screen::HOME && screen != Screen::SNAKE) {
+    if (screen == Screen::SETTINGS && settingDetail) {
+      saveSettings();
+      if (settingsIndex == 3 || settingsIndex == 4) networkApplyAt = millis() + 500;
+    }
     screen = Screen::HOME;
     lastInteraction = millis();
     showHome();

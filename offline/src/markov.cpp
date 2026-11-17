@@ -14,10 +14,15 @@
 #include <string.h>
 
 #include "markov_api.h"
+#include "board_config.h"
 
 namespace {
 
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+constexpr uint16_t MARKOV_BUCKETS = 512; // 32 KB; leave room for Wi-Fi + TLS
+#else
 constexpr uint16_t MARKOV_BUCKETS = 1024;
+#endif
 constexpr uint8_t MARKOV_SLOTS = 8;
 constexpr uint8_t MARK_START = 0x01;      // invisible sentence-start marker
 constexpr uint8_t MARK_END = '\n';        // sentence terminator

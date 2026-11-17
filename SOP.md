@@ -1,5 +1,13 @@
 # SOP: Lucy AI ESP32 — Agent Handoff & Project Playbook
 
+**0.3.0 C3 update:** the owner requested ESP32-C3 Mini, OLED on GPIO6/7 and
+MAX98357A audio. Current C3 wiring/build/verification is in
+[`offline/C3_MINI.md`](offline/C3_MINI.md). The hardware inventory and measured
+classic-device results below are historical and must not be treated as C3
+measurements. Use the PlatformIO build for this version; the old manual Arduino
+copy recipe omits the new UI/audio/config headers. No connected serial board was
+available for the C3 development pass. Branch/push/backup rules still apply.
+
 **Audience:** any AI agent (or new human) asked to build, debug, or extend this project.
 **Repo:** https://github.com/vikasdocker/Lucy-AI-ESP32.git — branch **`offline-os-v1`** (commit `e0e407b` at time of writing). **All work must land on `offline-os-v1` unless the owner says otherwise.**
 **Path on disk:** `C:\Users\vikas\OneDrive\Desktop\Lucy-AI-ESP32`

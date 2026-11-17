@@ -1,4 +1,12 @@
-# Lucy Offline OS — ESP32 DevKit V1
+# Lucy Offline OS
+
+**New: Cat OS 0.3.0 for ESP32-C3 Mini** — animated cat boot + spoken greeting,
+120 procedural cat clips, clean home screen, one-button settings, MAX98357A
+audio, phone provisioning and optional read-only MCP. See [C3_MINI.md](C3_MINI.md)
+for the current C3 wiring, features, build and limits. `pio run` now defaults
+to the C3 target; use `pio run -e lucy_offline` for the old classic ESP32.
+
+The following notes describe the earlier classic ESP32 release.
 
 This is a separate offline firmware target for the existing Lucy-AI-ESP32 repository. It does not replace the current AP+STA/web/Cloudflare firmware.
 

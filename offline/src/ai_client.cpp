@@ -15,6 +15,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <string.h>
+#include <ArduinoJson.h>
 
 #include "ai_api.h"
 #include "tls_root_ca.h"
@@ -32,11 +33,13 @@ constexpr unsigned long CLOUD_TIMEOUT_MS = 45000;
 
 char baseUrl[96] = "http://192.168.4.2:11434";
 char modelCfg[40] = "qwen2.5:7b";
+uint8_t replyLanguage = 0;
 char tokenCfg[96] = "";
 bool insecureTls = false;
 
 unsigned long retryAt = 0;
 int lastStatus = 0;
+void (*idleHook)() = nullptr;
 char outBuf[AI_OUT_MAX];
 
 // Rolling history so the model can follow a short conversation.
@@ -80,101 +83,6 @@ void appendEscaped(String &out, const char *text) {
   }
 }
 
-int hexVal(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  return -1;
-}
-
-bool readHex4(const char *p, uint32_t *value) {
-  uint32_t v = 0;
-  for (int i = 0; i < 4; i++) {
-    int h = hexVal(p[i]);
-    if (h < 0) return false;
-    v = (v << 4) | (uint32_t)h;
-  }
-  *value = v;
-  return true;
-}
-
-size_t appendUtf8(char *dst, size_t n, size_t max, uint32_t cp) {
-  if (cp < 0x80) {
-    if (n + 1 < max) dst[n++] = (char)cp;
-  } else if (cp < 0x800) {
-    if (n + 2 < max) {
-      dst[n++] = (char)(0xC0 | (cp >> 6));
-      dst[n++] = (char)(0x80 | (cp & 0x3F));
-    }
-  } else if (cp < 0x10000) {
-    if (n + 3 < max) {
-      dst[n++] = (char)(0xE0 | (cp >> 12));
-      dst[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-      dst[n++] = (char)(0x80 | (cp & 0x3F));
-    }
-  } else {
-    if (n + 4 < max) {
-      dst[n++] = (char)(0xF0 | (cp >> 18));
-      dst[n++] = (char)(0x80 | ((cp >> 12) & 0x3F));
-      dst[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-      dst[n++] = (char)(0x80 | (cp & 0x3F));
-    }
-  }
-  return n;
-}
-
-// Pulls message.content out of the JSON and decodes JSON escapes.
-bool extractContent(const char *json, char *dst, size_t max) {
-  const char *p = strstr(json, "\"content\":\"");
-  if (p == nullptr) return false;
-  p += 11;
-
-  size_t n = 0;
-  while (*p != '\0' && *p != '"' && n + 1 < max) {
-    if (*p != '\\') {
-      dst[n++] = *p++;
-      continue;
-    }
-    p++;
-    switch (*p) {
-      case 'n': dst[n++] = ' '; p++; break;
-      case 'r': dst[n++] = ' '; p++; break;
-      case 't': dst[n++] = ' '; p++; break;
-      case '"': dst[n++] = '"'; p++; break;
-      case '\\': dst[n++] = '\\'; p++; break;
-      case '/': dst[n++] = '/'; p++; break;
-      case 'u': {
-        uint32_t cp = 0;
-        if (!readHex4(p + 1, &cp)) { p++; break; }
-        p += 5;
-        // Combine a UTF-16 surrogate pair when present.
-        if (cp >= 0xD800 && cp <= 0xDBFF && p[0] == '\\' && p[1] == 'u') {
-          uint32_t low = 0;
-          if (readHex4(p + 2, &low) && low >= 0xDC00 && low <= 0xDFFF) {
-            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-            p += 6;
-          }
-        }
-        n = appendUtf8(dst, n, max, cp);
-        break;
-      }
-      default:
-        if (*p != '\0') dst[n++] = *p++;
-        break;
-    }
-  }
-  dst[n] = '\0';
-
-  // Trim leading/trailing whitespace.
-  size_t start = 0;
-  while (dst[start] == ' ') start++;
-  size_t end = strlen(dst);
-  while (end > start && (dst[end - 1] == ' ' || dst[end - 1] == '\n' || dst[end - 1] == '\r')) end--;
-  if (start > 0 && end > start) memmove(dst, dst + start, end - start);
-  dst[end - start] = '\0';
-  return dst[0] != '\0';
-}
-
 void pushHistory(const char *user, const char *bot) {
   if (histCount == AI_HISTORY) {
     memmove(histUser[0], histUser[1], sizeof(histUser[0]) * (AI_HISTORY - 1));
@@ -206,6 +114,7 @@ bool beginRequest(HTTPClient &http, WiFiClient &plain, WiFiClientSecure &secure,
     http.setConnectTimeout(3000);
   }
   http.setReuse(false);
+  http.useHTTP10(true);
   http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
   return true;
 }
@@ -223,6 +132,8 @@ const char *requestChat(const char *text) {
   appendEscaped(body, modelCfg);
   body += "\",\"stream\":false,\"keep_alive\":\"10m\",\"messages\":[{\"role\":\"system\",\"content\":\"";
   appendEscaped(body, SYSTEM_PROMPT);
+  appendEscaped(body, replyLanguage == 1 ? " Always reply in romanized Hindi." :
+      (replyLanguage == 2 ? " Always reply in romanized Marathi." : " Always reply in English."));
   body += "\"}";
   for (int i = 0; i < histCount; i++) {
     body += ",{\"role\":\"user\",\"content\":\"";
@@ -247,15 +158,45 @@ const char *requestChat(const char *text) {
     http.end();
     return nullptr;
   }
-  String payload = http.getString();
+  // Parse only message.content, with a fixed-capacity document and nesting cap.
+  // Reading the stream avoids copying an unbounded server response into a String.
+  StaticJsonDocument<128> filter;
+  filter["message"]["content"] = true;
+  DynamicJsonDocument response(2048);
+  // HTTP/1.0 avoids chunked transfer framing on the stream.
+  const auto err = deserializeJson(response, http.getStream(),
+      DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(8));
   http.end();
-
-  if (!extractContent(payload.c_str(), outBuf, sizeof(outBuf))) return nullptr;
+  if (err || !response["message"]["content"].is<const char *>()) return nullptr;
+  const char *content = response["message"]["content"];
+  if (!content[0]) return nullptr;
+  strncpy(outBuf, content, sizeof(outBuf) - 1);
+  outBuf[sizeof(outBuf) - 1] = '\0';
   pushHistory(text, outBuf);
   return outBuf;
 }
 
 } // namespace
+
+namespace {
+struct ChatJob { const char *text; const char *reply; TaskHandle_t caller; };
+void chatTask(void *context) {
+  auto *job = static_cast<ChatJob *>(context);
+  job->reply = requestChat(job->text);
+  xTaskNotifyGive(job->caller);
+  vTaskDelete(nullptr);
+}
+const char *chatWithUi(const char *text) {
+  if (!networkReady()) return nullptr;
+  ChatJob job{text, nullptr, xTaskGetCurrentTaskHandle()};
+  // Leave enough heap for mbedTLS as well as the UI and network stacks.
+  if (ESP.getFreeHeap() < 80000 || xTaskCreate(chatTask, "lucy-chat", 12288, &job, 1, nullptr) != pdPASS) return nullptr;
+  while (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(4)) == 0) {
+    if (idleHook) idleHook();
+  }
+  return job.reply;
+}
+}
 
 void aiSetUrl(const char *url) {
   if (url != nullptr && url[0] != '\0') {
@@ -286,6 +227,7 @@ void aiSetModel(const char *model) {
   }
   retryAt = 0;
 }
+void aiSetLanguage(uint8_t language) { replyLanguage = language <= 2 ? language : 0; }
 
 void aiSetToken(const char *token) {
   if (token == nullptr) return;
@@ -308,12 +250,13 @@ bool aiUsesTls() { return usesTls(); }
 int aiLastStatus() { return lastStatus; }
 
 void aiClearRetry() { retryAt = 0; }
+void aiSetIdleHook(void (*hook)()) { idleHook = hook; }
 
 const char *aiReply(const char *text) {
   if (text == nullptr || text[0] == '\0') return nullptr;
-  if (retryAt != 0 && millis() < retryAt) return nullptr;
+  if (retryAt != 0 && int32_t(millis() - retryAt) < 0) return nullptr;
 
-  const char *reply = requestChat(text);
+  const char *reply = chatWithUi(text);
   if (reply == nullptr) {
     // Do not hammer a sleeping server: pause requests for a while.
     retryAt = millis() + RETRY_BACKOFF_MS;

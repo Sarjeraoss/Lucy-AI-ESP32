@@ -17,6 +17,7 @@ void aiSetUrl(const char *url);
 // Convenience for LAN Ollama: builds http://host:port.
 void aiSetEndpoint(const char *host, uint16_t port);
 void aiSetModel(const char *model);
+void aiSetLanguage(uint8_t language);
 // Sent as x-lucy-token. Empty = no header (LAN Ollama ignores it anyway).
 void aiSetToken(const char *token);
 // Escape hatch: skip certificate verification if the CA ever changes.
@@ -46,3 +47,6 @@ int aiLastStatus();
 
 // Forget the circuit breaker (e.g. after the user fixes the network).
 void aiClearRetry();
+// Called on the UI task while a separate network task waits for a chat reply.
+// Must not reenter WebServer, chat, serial parsing, or AI configuration.
+void aiSetIdleHook(void (*hook)());
