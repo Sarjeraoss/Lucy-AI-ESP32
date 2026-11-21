@@ -39,21 +39,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install platformio==6.2.0 pillow
-      - name: Generate device token for Clipbot
-        if: matrix.environment == 'lucy_clipbot_c3'
-        env:
-          DEVICE_SECRET: ${{ secrets.LUCY_DEVICE_TOKEN }}
-        run: |
-          python - <<'PY'
-          import json, os
-          from pathlib import Path
-          secret = os.getenv('DEVICE_SECRET', '')
-          if secret and len(secret) < 24:
-              raise SystemExit('Device token must have 24 or more characters')
-          Path('offline/src/lucy_device_config.h').write_text(
-              '#pragma once\n#define LUCY_DEVICE_TOKEN ' + json.dumps(secret) + '\n')
-          print('Private device header prepared, credential not shown')
-          PY
       - name: Refresh Worker TLS root CA trust for Clipbot
         if: matrix.environment == 'lucy_clipbot_c3'
         run: node tools/gen_root_ca.js sparkling-fog-fdc8.vikasshu7.workers.dev

@@ -182,8 +182,8 @@ configuration controls are removed from the user settings UI, but the
 Serial Monitor AI commands remain for debugging. Automatic online chat
 is enabled on boot and falls back to local rules when disconnected.
 
-A separate device credential `LUCY_DEVICE_TOKEN` is injected by GitHub
-Actions using the repository secret of the same name. No actual credential
+A separate device credential `LUCY_DEVICE_TOKEN` is injected only
+during a private local build, not by public GitHub Actions. No actual credential
 is committed. Builds without the GitHub secret will boot but cannot
 authenticate to the Worker. The same secret must be configured in
 Cloudflare for the `sparkling-fog-fdc8` Worker.

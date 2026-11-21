@@ -56,3 +56,22 @@ before a local firmware build. The generator picks matching roots from
 Node's bundled trusted CA store but **cannot prove** which root Cloudflare
 uses for every edge certificate or validate the deployed certificate.
 Perform an actual ESP32 TLS connection test after flashing.
+
+## Private local firmware build (recommended)
+
+In a private PowerShell session:
+```powershell
+cd C:\Users\Sarjerao\Lucy-AI-ESP32
+$env:LUCY_DEVICE_TOKEN = Read-Host "Enter your device token"
+node tools/write_device_token.js
+cd offline
+pio run -e lucy_clipbot_c3
+Remove-Item Env:LUCY_DEVICE_TOKEN
+```
+Upload `offline/.pio/build/lucy_clipbot_c3/firmware.bin`
+only if it fits your existing OTA partition. The resulting firmware
+contains a device credential that can be extracted. Do not publish it
+or distribute it publicly. No OpenAI API key is present in firmware.
+
+To deploy the Worker, set `LUCY_DEVICE_TOKEN` separately using
+`npx wrangler secret put LUCY_DEVICE_TOKEN`.
