@@ -22,12 +22,12 @@ button{padding:14px 24px;border:0;border-radius:12px;background:#a8e6cf;font-siz
 <label>Password <input name="ap_password" type="password" minlength="8" maxlength="63" autocomplete="new-password" placeholder="Leave blank to keep current password"></label>
 <label><input type="checkbox" name="ap_open"> Use an open setup network</label>
 <small>Reconnect after changing these settings. The physical button can enable the access point again.</small>
-</fieldset><fieldset><legend>AI model</legend>
+</fieldset><fieldset><legend>Online AI brain</legend>
 <label><input type="checkbox" name="ai_enabled"> Use model server (offline fallback stays available)</label>
-<label>Ollama or Lucy gateway URL <input name="ai_url" maxlength="95" required></label>
-<label>Model name <input name="ai_model" maxlength="39" required></label>
-<label>Gateway token <input name="ai_token" type="password" maxlength="95" autocomplete="new-password" placeholder="Leave blank to keep saved token"></label>
-<small>The model runs on your server. A gateway may enforce its own model name. All model downloads happen on the server.</small>
+<label>OpenCode bridge URL (Clipbot) <input name="ai_url" maxlength="95" required></label>
+<label>Legacy model name (ignored by Clipbot) <input name="ai_model" maxlength="39" required></label>
+<label>OpenCode bridge token <input name="ai_token" type="password" maxlength="95" autocomplete="new-password" placeholder="Leave blank to keep saved token"></label>
+<small>Clipbot sends chat to the OpenCode bridge /chat with X-Bridge-Token. The server selects its model. The existing read-only MCP tools remain separate.</small>
 </fieldset><fieldset><legend>Clipbot speech (ESP speaker)</legend>
 <label><input type="checkbox" name="tts_enabled"> Speak text replies through MAX98357A</label>
 <label>TTS server URL (local HTTP or remote HTTPS) <input name="tts_url" maxlength="95" placeholder="https://voice.example.com"></label>

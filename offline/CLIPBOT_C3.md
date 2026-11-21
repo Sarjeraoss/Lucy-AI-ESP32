@@ -142,3 +142,34 @@ the partition table. For future Web OTA updates, always select the
 lucy-clipbot-c3-app.bin artifact, not the original lucy-cat-c3-mini
 or a merged USB image. The updater is included in each Clipbot build.
 Do not interrupt power during an upload.
+
+## OpenCode bridge online brain (Clipbot-only)
+
+The `lucy_clipbot_c3` target now uses only the
+`vikasdocker/opencode-with-lucky/bridge/server.js` protocol for ONLINE chat.
+Its POST `/chat` request contains a `messages` array with user/assistant
+turns, sends `X-Bridge-Token` from the stored Lucy AI token, and reads the
+response's `reply` field. GET `/health` is used by the serial AI diagnostics.
+
+**The bridge chooses the model.** The Clipbot firmware does not send a model
+name and does not directly call Ollama or any second online AI endpoint.
+The bridge may itself switch between primary and fallback models according
+to its own `config.json`; that is server-side behavior.
+
+The default URL follows the source repository documentation:
+`https://chat.blueflutex.in`. It is not verified to be active or accessible
+to you. The bridge must actually be running. Get its correct URL and token
+from the server operator, never store the token in GitHub or chat.
+
+Connect to `Lucy-Setup`, open `http://192.168.4.1/settings`,
+enable Online AI brain, set the OpenCode bridge base URL and matching token,
+then save. The existing `AI` command checks `/health` (which may be public);
+test a chat request too to confirm authentication. Without a reachable bridge
+Lucy retains her limited offline keyword brain and cat animations.
+
+The existing `/mcp` endpoint remains unchanged, with read-only
+`lucy_status` and `lucy_animations` tools. MCP is separate from AI
+inference; this patch does not make OpenCode itself an MCP endpoint.
+Speech output still requires the separately configured TTS gateway.
+The original bridge normally runs on a PC with OpenCode; deploying the bridge
+on an always-on server is necessary to remove that dependency.

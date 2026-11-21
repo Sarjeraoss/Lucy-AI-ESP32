@@ -31,7 +31,11 @@ constexpr unsigned long RETRY_BACKOFF_MS = 30000;
 constexpr unsigned long LAN_TIMEOUT_MS = 15000;
 constexpr unsigned long CLOUD_TIMEOUT_MS = 45000;
 
+#if defined(LUCY_CLIPBOT_C3)
+char baseUrl[96] = "https://chat.blueflutex.in"; // Documented bridge URL, not guaranteed online
+#else
 char baseUrl[96] = "http://192.168.4.2:11434";
+#endif
 char modelCfg[40] = "qwen2.5:7b";
 uint8_t replyLanguage = 0;
 char tokenCfg[96] = "";
@@ -120,14 +124,33 @@ bool beginRequest(HTTPClient &http, WiFiClient &plain, WiFiClientSecure &secure,
 }
 
 void addAuth(HTTPClient &http) {
+#if defined(LUCY_CLIPBOT_C3)
+  if (tokenCfg[0] != '\0') http.addHeader("X-Bridge-Token", tokenCfg);
+#else
   if (tokenCfg[0] != '\0') http.addHeader("x-lucy-token", tokenCfg);
+#endif
 }
 
 const char *requestChat(const char *text) {
-  if (!networkReady()) return nullptr;
-
+  if (!networkReady()) { lastStatus = 0; return nullptr; }
   String body;
   body.reserve(1024);
+#if defined(LUCY_CLIPBOT_C3)
+  // Use exactly the OpenCode bridge protocol. Model routing is on the server.
+  body += "{\"messages\":[";
+  for (int i = 0; i < histCount; ++i) {
+    if (i) body += ",";
+    body += "{\"role\":\"user\",\"content\":\"";
+    appendEscaped(body, histUser[i]);
+    body += "\"},{\"role\":\"assistant\",\"content\":\"";
+    appendEscaped(body, histBot[i]);
+    body += "\"}";
+  }
+  if (histCount) body += ",";
+  body += "{\"role\":\"user\",\"content\":\"";
+  appendEscaped(body, text);
+  body += "\"}]}";
+#else
   body += "{\"model\":\"";
   appendEscaped(body, modelCfg);
   body += "\",\"stream\":false,\"keep_alive\":\"10m\",\"messages\":[{\"role\":\"system\",\"content\":\"";
@@ -145,31 +168,37 @@ const char *requestChat(const char *text) {
   body += ",{\"role\":\"user\",\"content\":\"";
   appendEscaped(body, text);
   body += "\"}],\"options\":{\"temperature\":0.7,\"num_predict\":90}}";
+#endif
 
   HTTPClient http;
   WiFiClient plain;
   WiFiClientSecure secure;
-  if (!beginRequest(http, plain, secure, endpoint("/api/chat"))) return nullptr;
-
+#if defined(LUCY_CLIPBOT_C3)
+  if (!beginRequest(http, plain, secure, endpoint("/chat"))) { lastStatus = 0; return nullptr; }
+#else
+  if (!beginRequest(http, plain, secure, endpoint("/api/chat"))) { lastStatus = 0; return nullptr; }
+#endif
   http.addHeader("Content-Type", "application/json");
   addAuth(http);
   lastStatus = http.POST((uint8_t *)body.c_str(), body.length());
-  if (lastStatus != 200) {
-    http.end();
-    return nullptr;
-  }
-  // Parse only message.content, with a fixed-capacity document and nesting cap.
-  // Reading the stream avoids copying an unbounded server response into a String.
+  if (lastStatus != 200) { http.end(); return nullptr; }
   StaticJsonDocument<128> filter;
+#if defined(LUCY_CLIPBOT_C3)
+  filter["reply"] = true;
+#else
   filter["message"]["content"] = true;
+#endif
   DynamicJsonDocument response(2048);
-  // HTTP/1.0 avoids chunked transfer framing on the stream.
   const auto err = deserializeJson(response, http.getStream(),
       DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(8));
   http.end();
-  if (err || !response["message"]["content"].is<const char *>()) return nullptr;
-  const char *content = response["message"]["content"];
-  if (!content[0]) return nullptr;
+  if (err) return nullptr;
+#if defined(LUCY_CLIPBOT_C3)
+  const char *content = response["reply"] | nullptr;
+#else
+  const char *content = response["message"]["content"] | nullptr;
+#endif
+  if (!content || !content[0]) return nullptr;
   strncpy(outBuf, content, sizeof(outBuf) - 1);
   outBuf[sizeof(outBuf) - 1] = '\0';
   pushHistory(text, outBuf);
@@ -275,7 +304,11 @@ bool aiPing(unsigned long timeoutMs) {
   HTTPClient http;
   WiFiClient plain;
   WiFiClientSecure secure;
+#if defined(LUCY_CLIPBOT_C3)
+  String url = endpoint("/health");
+#else
   String url = endpoint("/api/tags");
+#endif
   if (usesTls()) {
     if (insecureTls) secure.setInsecure();
     else secure.setCACert(LUCY_ROOT_CA);

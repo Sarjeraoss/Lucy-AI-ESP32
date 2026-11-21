@@ -1110,6 +1110,16 @@ const char *offlineReply(const char *input) {
   for (size_t i = 0; i < n; i++) normalized[i] = static_cast<char>(tolower(static_cast<unsigned char>(input[i])));
   normalized[n] = '\0';
 
+#if defined(LUCY_CLIPBOT_C3)
+  // The OpenCode bridge is Clipbot's sole online brain.
+  if (aiEnabled) {
+    const char *reply = aiReply(input);
+    if (reply != nullptr) {
+      lastReplyFromModel = true;
+      return reply;
+    }
+  }
+#endif
   // Self-learning generator is always local and always wins.
   if (textHasWord(normalized, "generate") || textHasWord(normalized, "invent") ||
       strstr(normalized, "make words") || strstr(normalized, "new words") ||
@@ -1128,8 +1138,8 @@ const char *offlineReply(const char *input) {
     return "Use the serial console for brain commands: brain stats, save, reset.";
   }
 
-  // PC-hosted model (Ollama). Falls through to the offline brain if disabled,
-  // unreachable, or in its retry backoff window.
+#if !defined(LUCY_CLIPBOT_C3)
+  // Other Lucy targets retain their existing Ollama-compatible transport.
   if (aiEnabled) {
     const char *ai = aiReply(input);
     if (ai != nullptr) {
@@ -1138,6 +1148,7 @@ const char *offlineReply(const char *input) {
     }
   }
 
+#endif
   if (strstr(normalized, "hello") || textHasWord(normalized, "hi") || textHasWord(normalized, "hey") || strstr(normalized, "namaste") || strstr(normalized, "namaskar")) {
     if (language == Language::HINDI) return "Namaste! Aap kaise hain?";
     if (language == Language::MARATHI) return "Namaskar! Kase aahat?";
@@ -1222,8 +1233,13 @@ void handleAiCommand(const char *line) {
     Serial.println(aiEnabled ? "on" : "off");
     Serial.print("  endpoint: ");
     Serial.println(aiUrl());
+#if defined(LUCY_CLIPBOT_C3)
+    Serial.println("  online brain: OpenCode bridge (/chat)");
+    Serial.println("  AI model selection: controlled by bridge/server.js");
+#else
     Serial.print("  model:    ");
     Serial.println(aiModel());
+#endif
     Serial.print("  token:    ");
     if (aiTokenLength() > 0) {
       Serial.print(aiTokenLength());
@@ -1253,7 +1269,11 @@ void handleAiCommand(const char *line) {
     aiEnabled = true;
     aiClearRetry();
     saveSettings();
+#if defined(LUCY_CLIPBOT_C3)
+    Serial.println("AI on: OpenCode bridge online, local fallback if unavailable.");
+#else
     Serial.println("AI: on. Chat uses the PC model when reachable, local brain otherwise.");
+#endif
   } else if (strcmp(line, "AI off") == 0) {
     aiEnabled = false;
     saveSettings();
@@ -1293,8 +1313,12 @@ void handleAiCommand(const char *line) {
     aiSetModel(line + 9);
     aiClearRetry();
     saveSettings();
+#if defined(LUCY_CLIPBOT_C3)
+    Serial.println("Clipbot model selection is managed by OpenCode bridge config.json.");
+#else
     Serial.print("AI: model ");
     Serial.println(aiModel());
+#endif
   } else {
     Serial.println("AI: AI | AI on|off | AI url <http(s)://...> | AI host <ip> [port]");
     Serial.println("    AI token <secret> | AI insecure on|off | AI model <name>");
