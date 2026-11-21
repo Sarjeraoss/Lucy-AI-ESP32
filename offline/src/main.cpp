@@ -17,6 +17,7 @@
 #include <ArduinoJson.h>
 
 #include "ai_api.h"
+#include "lucy_cloud_config.h"
 #include "intent_api.h"
 #include "markov_api.h"
 #include "board_config.h"
@@ -520,7 +521,9 @@ void saveSettings() {
   prefs.putString("aiHost", aiUrl());
   prefs.putUShort("aiPort", 0);
   prefs.putString("aiModel", aiModel());
+#if !defined(LUCY_CLIPBOT_C3)
   prefs.putString("aiTok", aiToken());
+#endif
   prefs.putBool("aiIns", aiInsecure());
   prefs.putString("wifiSsid", wifiSsid);
   prefs.putString("wifiPass", wifiPass);
@@ -545,7 +548,11 @@ void loadSettings() {
   uint8_t stored = prefs.getUChar("lang", 0);
   if (stored <= 2) language = static_cast<Language>(stored);
   soundEnabled = prefs.getBool("sound", false);
+#if defined(LUCY_CLIPBOT_C3)
+  aiEnabled = true;
+#else
   aiEnabled = prefs.getBool("aiOn", false);
+#endif
 
   String url = prefs.getString("aiUrl", "");
   if (url.length() == 0) {
@@ -814,7 +821,7 @@ void showCompanion(const char *message = nullptr) {
   }
   display.setFont(FONT_META);
   if (!message && hasChat) {
-    display.drawStr(3, 62, lastReplyFromModel ? "from PC model" : "offline brain");
+    display.drawStr(3, 62, lastReplyFromModel ? "from cloud" : "offline brain");
   } else if (!message) {
     display.drawStr(3, 62, "UP lang SEL demo");
   }
@@ -916,12 +923,7 @@ void handleSettingsButtons() {
           break;
         case 3: wifiEnabled = !wifiEnabled; break;
         case 4: apEnabled = !apEnabled; break;
-        case 5:
-          modelChoice = (modelChoice + 1) % 5;
-          aiEnabled = modelChoice != 0;
-          if (aiEnabled) aiSetModel(modelChoice == 1 ? savedModel.c_str() : MODEL_CHOICES[modelChoice]);
-          break;
-        case 6: if (mcpToken.length() >= 24) mcpEnabled = !mcpEnabled; break;
+
       }
       // Commit on save/back instead of writing flash on each tap.
       display.setContrast(brightness * 255 / 100);
@@ -934,8 +936,8 @@ void handleSettingsButtons() {
       if (settingsIndex == 3 || settingsIndex == 4) networkApplyAt = millis() + 500;
       settingDetail = false;
     }
-    else if (settingsIndex == 7) { screen = Screen::ABOUT; showAbout(); return; }
-    else if (settingsIndex == 8) { screen = Screen::MENU; menuIndex = 0; showMenu(); return; }
+    else if (settingsIndex == 5) { screen = Screen::ABOUT; showAbout(); return; }
+    else if (settingsIndex == 6) { screen = Screen::MENU; menuIndex = 0; showMenu(); return; }
     else settingDetail = true;
     showSettings();
   }
@@ -1111,7 +1113,7 @@ const char *offlineReply(const char *input) {
   normalized[n] = '\0';
 
 #if defined(LUCY_CLIPBOT_C3)
-  // The OpenCode bridge is Clipbot's sole online brain.
+  // The Cloudflare Worker is Clipbot's online brain.
   if (aiEnabled) {
     const char *reply = aiReply(input);
     if (reply != nullptr) {
@@ -1234,8 +1236,8 @@ void handleAiCommand(const char *line) {
     Serial.print("  endpoint: ");
     Serial.println(aiUrl());
 #if defined(LUCY_CLIPBOT_C3)
-    Serial.println("  online brain: OpenCode bridge (/chat)");
-    Serial.println("  AI model selection: controlled by bridge/server.js");
+    Serial.println("  online brain: Cloudflare Worker (/api/chat)");
+    Serial.println("  AI model: configured on Worker");
 #else
     Serial.print("  model:    ");
     Serial.println(aiModel());
@@ -1533,10 +1535,14 @@ render(new Uint8Array(1024));
 document.getElementById('up').onclick=function(){fetch('/press?btn=up');};
 document.getElementById('select').onclick=function(){fetch('/press?btn=select');};
 document.getElementById('back').onclick=function(){fetch('/press?btn=back');};
-form.onsubmit=function(e){e.preventDefault();var t=msg.value.trim();if(!t)return;say('You',t);msg.value='';fetch('/say?text='+encodeURIComponent(t)).then(function(r){return r.text();}).then(function(t){say('Lucy',t);}).catch(function(){say('Lucy','(no reply)');});};
+form.onsubmit=function(e){e.preventDefault();var t=msg.value.trim();if(!t)return;say('You',t);msg.value='';fetch('/say?text='+encodeURIComponent(t)).then(async function(r){while(r.status===202){await new Promise(function(resolve){setTimeout(resolve,250);});r=await fetch('/chat-result');}if(!r.ok)throw Error('busy');return r.text();}).then(function(t){say('Lucy',t);}).catch(function(){say('Lucy','(no reply)');});};
 </script>
 </body></html>)HTML";
 
+static void handleChatResult() {
+  if (aiBusy()) { webServer.send(202,"text/plain",""); return; }
+  webServer.send(200,"text/plain; charset=utf-8",chatReply);
+}
 static void handleWebRoot() { webServer.send_P(200, "text/html; charset=utf-8", WEB_PAGE); }
 
 static void handleWebFrame() {
@@ -1558,6 +1564,7 @@ static void handleWebPress() {
 }
 
 static void handleWebSay() {
+  if (aiBusy()) { webServer.send(409, "text/plain", "Lucy is thinking."); return; }
   String text = webServer.arg("text");
   text.trim();
   if (text.isEmpty()) { webServer.send(400, "text/plain", "empty"); return; }
@@ -1565,7 +1572,7 @@ static void handleWebSay() {
   markovLearn(text.c_str()); // same learning path as the serial console
   const char *reply = offlineReply(text.c_str());
   setChat(text.c_str(), reply);
-  webServer.send(200, "text/plain; charset=utf-8", reply);
+  webServer.send(aiBusy()?202:200, "text/plain; charset=utf-8", reply);
 #if defined(LUCY_CLIPBOT_C3)
   screen = Screen::COMPANION;
   lastInteraction = millis();
@@ -1618,10 +1625,12 @@ static void handleSettingsGet() {
   doc["ap_enabled"] = apEnabled;
   doc["ap_ssid"] = apSsid;
   doc["ap_open"] = apPass.isEmpty();
+#if !defined(LUCY_CLIPBOT_C3)
   doc["ai_enabled"] = aiEnabled;
   doc["ai_url"] = aiUrl();
   doc["ai_model"] = aiModel();
   doc["mcp_enabled"] = mcpEnabled;
+#endif
 #if defined(LUCY_CLIPBOT_C3)
   doc["tts_enabled"] = clipbotTtsOn;
   doc["tts_url"] = clipbotTtsBase;
@@ -1671,6 +1680,7 @@ static void handleSettingsSave() {
       nextPass.length() > 64 || nextApPass.length() > 63 ||
       (nextApPass.length() > 0 && nextApPass.length() < 8) ||
       (nextWifiOn && !nextSsid.length())) { invalid("Check network names and password lengths."); return; }
+#if !defined(LUCY_CLIPBOT_C3)
   if ((!nextUrl.startsWith("http://") && !nextUrl.startsWith("https://")) ||
       nextUrl.length() > 95 || nextUrl.indexOf('@') >= 0 || nextUrl.indexOf('?') >= 0 ||
       nextUrl.indexOf('#') >= 0 || nextUrl.indexOf(' ') >= 0 ||
@@ -1684,6 +1694,7 @@ static void handleSettingsSave() {
   for (size_t i = 0; i < nextMcp.length(); i++) {
     if (nextMcp[i] <= 32 || nextMcp[i] >= 127) { invalid("Use visible non-space ASCII in the MCP token."); return; }
   }
+#endif
   // Validate everything before changing any state. Blank secrets preserve NVS.
   if (!nextPass.length()) nextPass = wifiPass;
   if (webServer.arg("wifi_open") == "1") nextPass = "";
@@ -1697,12 +1708,21 @@ static void handleSettingsSave() {
   language = static_cast<Language>(nextLanguage);
   wifiSsid = nextSsid; wifiPass = nextPass; wifiEnabled = nextWifiOn;
   apSsid = nextAp; apPass = nextApPass; apEnabled = nextApOn;
+#if defined(LUCY_CLIPBOT_C3)
+  aiEnabled = true;
+  aiSetUrl(LUCY_WORKER_URL);
+  aiSetModel("gpt-4o-mini");
+  aiSetToken(LUCY_DEVICE_TOKEN);
+#else
   aiEnabled = webServer.arg("ai_enabled") == "1";
   aiSetUrl(nextUrl.c_str()); aiSetModel(nextModel.c_str());
+#endif
   savedModel = nextModel; modelChoice = aiEnabled ? 1 : 0;
+#if !defined(LUCY_CLIPBOT_C3)
   if (nextToken.length()) aiSetToken(nextToken.c_str());
   if (nextMcp.length()) mcpToken = nextMcp;
   mcpEnabled = nextMcpOn;
+#endif
 #if defined(LUCY_CLIPBOT_C3)
   clipbotTtsBase = nextTtsUrl;
   if (nextTtsToken.length()) clipbotTtsToken = nextTtsToken;
@@ -1851,6 +1871,7 @@ static void webConsoleBegin() {
   webServer.on("/mcp", HTTP_ANY, handleMcp);
   webServer.on("/frame.bin", HTTP_GET, handleWebFrame);
   webServer.on("/press", HTTP_GET, handleWebPress);
+  webServer.on("/chat-result", HTTP_GET, handleChatResult);
   webServer.on("/say", HTTP_ANY, handleWebSay);
 #if defined(LUCY_CLIPBOT_C3)
   webServer.on("/ota", HTTP_GET, clipbotOtaPage);
@@ -1917,6 +1938,13 @@ void setup() {
   prefs.begin("lucy-os", false);
   loadSettings();
   aiSetLanguage(static_cast<uint8_t>(language));
+#if defined(LUCY_CLIPBOT_C3)
+  aiEnabled = true;
+  aiSetUrl(LUCY_WORKER_URL);
+  aiSetModel("gpt-4o-mini");
+  aiSetToken(LUCY_DEVICE_TOKEN);
+  aiSetInsecureTls(false);
+#endif
   savedModel = aiModel();
   modelChoice = aiEnabled ? 1 : 0;
   display.setContrast(brightness * 255 / 100);
@@ -2016,6 +2044,17 @@ void handleRtcSetCommand(const char *line) {
 }
 
 void loop() {
+  const char *completedText = nullptr;
+  const char *completedReply = aiPollReply(&completedText);
+  if (completedReply) {
+    lastReplyFromModel = true;
+    setChat(completedText, completedReply);
+    Serial.print("Lucy: "); Serial.println(completedReply);
+#if defined(LUCY_CLIPBOT_C3)
+    clipbotQueueSpeech(completedReply);
+#endif
+    if (screen == Screen::COMPANION) showCompanion();
+  }
   pollButton(btnUp);
   pollButton(btnSelect);
   pollButton(btnBack);
