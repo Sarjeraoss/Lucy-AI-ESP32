@@ -9,6 +9,11 @@
 #include <string.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#if defined(LUCY_CLIPBOT_C3)
+#include <Update.h>
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
+#endif
 #include <ArduinoJson.h>
 
 #include "ai_api.h"
@@ -90,6 +95,13 @@ bool clipbotTtsOn = false;
 char clipbotSpeechQueue[192] = {};
 
 bool clipbotNetworkReady = false;
+String clipbotOtaPassword;
+bool clipbotOtaAuthorized = false;
+bool clipbotOtaSuccess = false;
+bool clipbotOtaUploading = false;
+bool clipbotOtaReboot = false;
+uint32_t clipbotOtaRebootAt = 0;
+uint32_t clipbotOtaBytes = 0;
 #endif
 uint16_t snakeScore = 0;
 uint8_t snakeX[48], snakeY[48], snakeLength = 3;
@@ -563,6 +575,14 @@ void loadSettings() {
   mcpToken = prefs.getString("mcpTok", "");
   mcpEnabled = prefs.getBool("mcpOn", false) && mcpToken.length() >= 24;
 #if defined(LUCY_CLIPBOT_C3)
+  clipbotOtaPassword = prefs.getString("otaPassword", "");
+  if (clipbotOtaPassword.length() < 16) {
+    char key[17];
+    snprintf(key, sizeof(key), "%08lX%08lX",
+             (unsigned long)esp_random(), (unsigned long)esp_random());
+    clipbotOtaPassword = key;
+    prefs.putString("otaPassword", clipbotOtaPassword);
+  }
   clipbotTtsBase = prefs.getString("ttsUrl", "");
   clipbotTtsToken = prefs.getString("ttsToken", "");
   clipbotTtsOn = prefs.getBool("ttsOn", false);
@@ -1717,6 +1737,82 @@ static void handleMcp() {
   webServer.send(200, "application/json", json);
 }
 
+
+#if defined(LUCY_CLIPBOT_C3)
+static bool clipbotOtaAuth() {
+  if (clipbotOtaPassword.length() >= 16 &&
+      webServer.authenticate("clipbot", clipbotOtaPassword.c_str())) return true;
+  webServer.requestAuthentication();
+  return false;
+}
+static const char CLIPBOT_OTA_PAGE[] PROGMEM = R"HTML(
+<!doctype html><html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Clipbot OTA</title><style>body{max-width:480px;margin:30px auto;padding:20px;background:#10151b;color:white;font:16px system-ui}
+button,input{margin:12px 0;font-size:16px}button{padding:12px;background:#76dbce;border:0;border-radius:8px}progress{width:100%}</style>
+<h2>Clipbot firmware update</h2><p>Use only a compatible ESP32-C3 application .bin.
+Do not upload merged USB firmware or partition/bootloader images.</p>
+<form id="f"><input type="file" name="firmware" accept=".bin" required><button>Update</button></form>
+<progress max="100" value="0" id="p"></progress><p id="s">Ready</p>
+<script>document.getElementById('f').onsubmit=function(e){e.preventDefault();
+let file=this.querySelector('input').files[0];if(!file||!file.name.toLowerCase().endsWith('.bin'))return;
+let data=new FormData();data.append('firmware',file);let x=new XMLHttpRequest();
+x.open('POST','/ota/update');x.upload.onprogress=e=>{if(e.lengthComputable)document.getElementById('p').value=e.loaded*100/e.total};
+x.onload=()=>document.getElementById('s').textContent=x.responseText;
+x.onerror=()=>document.getElementById('s').textContent='Connection interrupted; check device after reboot';
+document.getElementById('s').textContent='Uploading';x.send(data)};</script></html>
+)HTML";
+static void clipbotOtaPage() {
+  if (!clipbotOtaAuth()) return;
+  if (!esp_ota_get_next_update_partition(nullptr)) {
+    webServer.send(409, "text/plain", "Installed partition table has no OTA slot; cannot update over Web OTA.");
+    return;
+  }
+  webServer.send_P(200, "text/html; charset=utf-8", CLIPBOT_OTA_PAGE);
+}
+static void clipbotOtaPost() {
+  if (!clipbotOtaAuthorized) { clipbotOtaAuth(); return; }
+  if (clipbotOtaSuccess && !Update.hasError()) {
+    webServer.send(200, "text/plain", "Update accepted. Rebooting...");
+    clipbotOtaReboot = true;
+    clipbotOtaRebootAt = millis();
+  } else webServer.send(500, "text/plain", "Update failed; check serial log.");
+  clipbotOtaAuthorized = false;
+}
+static void clipbotOtaUpload() {
+  HTTPUpload& u = webServer.upload();
+  if (u.status == UPLOAD_FILE_START) {
+    clipbotOtaAuthorized = clipbotOtaAuth();
+    clipbotOtaSuccess = false; clipbotOtaUploading = false; clipbotOtaBytes = 0;
+    if (!clipbotOtaAuthorized) return;
+    const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
+    if (!next || !u.filename.endsWith(".bin") || !Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+      Serial.println("OTA: invalid file or partition");
+      Update.printError(Serial);
+      return;
+    }
+    clipbotOtaUploading = true;
+    Serial.printf("OTA: target slot capacity %lu bytes\n", (unsigned long)next->size);
+  } else if (u.status == UPLOAD_FILE_WRITE) {
+    if (!clipbotOtaAuthorized || !clipbotOtaUploading || Update.hasError()) return;
+    const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
+    clipbotOtaBytes += u.currentSize;
+    if (!next || clipbotOtaBytes > next->size ||
+        Update.write(u.buf, u.currentSize) != u.currentSize) {
+      Serial.println("OTA write failed or image too large");
+      Update.abort(); clipbotOtaUploading = false;
+    }
+  } else if (u.status == UPLOAD_FILE_END) {
+    if (!clipbotOtaAuthorized || !clipbotOtaUploading || Update.hasError()) return;
+    clipbotOtaSuccess = Update.end(true);
+    clipbotOtaUploading = false;
+    if (!clipbotOtaSuccess) Update.printError(Serial);
+  } else if (u.status == UPLOAD_FILE_ABORTED) {
+    if (clipbotOtaUploading) Update.abort();
+    clipbotOtaUploading = false; clipbotOtaAuthorized = false;
+  }
+}
+#endif
+
 static void webConsoleBegin() {
   WiFi.persistent(false);
   applyNetwork();
@@ -1732,6 +1828,10 @@ static void webConsoleBegin() {
   webServer.on("/frame.bin", HTTP_GET, handleWebFrame);
   webServer.on("/press", HTTP_GET, handleWebPress);
   webServer.on("/say", HTTP_ANY, handleWebSay);
+#if defined(LUCY_CLIPBOT_C3)
+  webServer.on("/ota", HTTP_GET, clipbotOtaPage);
+  webServer.on("/ota/update", HTTP_POST, clipbotOtaPost, clipbotOtaUpload);
+#endif
   webServer.begin();
 #if defined(LUCY_CLIPBOT_C3)
   clipbotNetworkReady = true;
@@ -1860,6 +1960,22 @@ void setup() {
   screen = Screen::HOME;
   lastInteraction = millis();
   showHome();
+#if defined(LUCY_CLIPBOT_C3)
+  // Locally display the persistent OTA password during boot.
+  display.clearBuffer();
+  display.setFont(FONT_META);
+  display.drawStr(2, 10, "CLIPBOT OTA LOGIN");
+  display.drawStr(2, 23, "Username: clipbot");
+  display.drawStr(2, 36, "Password:");
+  display.drawStr(2, 49, clipbotOtaPassword.c_str());
+  display.drawStr(2, 62, "192.168.4.1/ota");
+  display.sendBuffer();
+  uint32_t t = millis();
+  while (millis() - t < 9500) {
+    speakerTick(); webConsoleLoop(); delay(5);
+  }
+  showHome();
+#endif
 }
 
 void handleRtcSetCommand(const char *line) {
@@ -1881,6 +1997,10 @@ void loop() {
   pollButton(btnBack);
   handleSerialConsole();
   webConsoleLoop();
+#if defined(LUCY_CLIPBOT_C3)
+  if (clipbotOtaReboot && millis() - clipbotOtaRebootAt > 1200) ESP.restart();
+  if (clipbotOtaUploading || clipbotOtaReboot) { delay(1); return; }
+#endif
   wifiLoop();
   serviceCompanion();
 #if defined(LUCY_CLIPBOT_C3)

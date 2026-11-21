@@ -126,3 +126,19 @@ Pollen Robotics/Hugging Face's MicroDuck runs on a Rockchip RK3566 Linux board,
 not ESP32-C3. Its updater, control daemons, speech and remote-access designs
 are architectural references only. No MicroDuck binary or servo/ONNX Linux
 runtime has been merged here.
+
+
+## Persistent Web OTA
+Clipbot now includes an authenticated firmware update page at
+http://192.168.4.1/ota while connected to its Lucy-Setup hotspot,
+or http://DEVICE-LAN-IP/ota while connected to its local network.
+The username is clipbot. A unique random password is generated once,
+saved in NVS, and shown on the OLED for 9.5 seconds during boot.
+Never expose the HTTP admin page on the public internet.
+
+The running firmware must have a valid second OTA app slot and the new
+application image must fit that slot. An application OTA cannot change
+the partition table. For future Web OTA updates, always select the
+lucy-clipbot-c3-app.bin artifact, not the original lucy-cat-c3-mini
+or a merged USB image. The updater is included in each Clipbot build.
+Do not interrupt power during an upload.
