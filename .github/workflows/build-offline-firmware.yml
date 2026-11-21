@@ -45,6 +45,8 @@ jobs:
       - name: Verify C3 animation renderer and MCP protocol
         if: matrix.environment == 'lucy_c3_mini' || matrix.environment == 'lucy_clipbot_c3'
         run: python tools/test_companion.py
+        env:
+          LUCY_TEST_ENV: ${{ matrix.environment }}
       - name: Stage firmware
         run: |
           mkdir -p release
