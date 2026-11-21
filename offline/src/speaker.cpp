@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <time.h>
+#include "clipbot_tts_ca.h"
 #include "board_config.h"
 #include "speaker.h"
 #include "cat_animation.h"
@@ -128,14 +131,26 @@ void speakerTick() {
 #endif
 }
 
-bool speakerSpeakPcm16Url(const String& url) {
+bool speakerSpeakPcm16Url(const String& url, const String& token) {
 #if LUCY_I2S_DIN >= 0
   if (!ready || volume == 0 || WiFi.status() != WL_CONNECTED) return false;
   WiFiClient client;
+  WiFiClientSecure secure;
   HTTPClient http;
-  http.setConnectTimeout(2500);
-  http.setTimeout(6000);
-  if (!http.begin(client, url)) return false;
+  http.setConnectTimeout(3500);
+  http.setTimeout(7000);
+  const bool tls = url.startsWith("https://");
+  if (tls) {
+    if (time(nullptr) < 1700000000) {
+      Serial.println("Clipbot TTS: system clock not synchronized; refusing HTTPS");
+      return false;
+    }
+    secure.setCACert(CLIPBOT_TTS_CA);
+    if (!http.begin(secure, url)) return false;
+  } else if (url.startsWith("http://")) {
+    if (!http.begin(client, url)) return false;
+  } else return false;
+  if (token.length()) http.addHeader("X-Clipbot-Token", token);
   const int status = http.GET();
   const int length = http.getSize();
   if (status != 200 || length <= 0 || length > 1024000 || (length % 2)) {

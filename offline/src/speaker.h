@@ -11,4 +11,4 @@ bool speakerBusy();
 
 // Stream 16 kHz, mono, signed 16-bit little-endian PCM from an HTTP TTS gateway.
 // The amplifier outputs a bounded, conservative version of the PCM stream.
-bool speakerSpeakPcm16Url(const String& url);
+bool speakerSpeakPcm16Url(const String& url, const String& token = "");

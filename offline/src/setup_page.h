@@ -30,8 +30,9 @@ button{padding:14px 24px;border:0;border-radius:12px;background:#a8e6cf;font-siz
 <small>The model runs on your server. A gateway may enforce its own model name. All model downloads happen on the server.</small>
 </fieldset><fieldset><legend>Clipbot speech (ESP speaker)</legend>
 <label><input type="checkbox" name="tts_enabled"> Speak text replies through MAX98357A</label>
-<label>Local TTS server URL <input name="tts_url" maxlength="95" placeholder="http://192.168.1.50:8765"></label>
-<small>Requires a running local TTS service returning 16 kHz mono signed 16-bit PCM. This is independent of the AI model URL.</small>
+<label>TTS server URL (local HTTP or remote HTTPS) <input name="tts_url" maxlength="95" placeholder="https://voice.example.com"></label>
+<label>Remote TTS access token <input name="tts_token" type="password" maxlength="95" placeholder="Leave blank to keep saved token"></label>
+<small>Use a local TTS service or a remote HTTPS service with a certificate chaining to ISRG Root X1. Requires 16 kHz mono signed 16-bit PCM and Content-Length. Remote access should require a token. This is independent of the AI model URL.</small>
 </fieldset><fieldset><legend>MCP setup</legend>
 <label><input type="checkbox" name="mcp_enabled"> Enable Lucy's read-only MCP server</label>
 <label>Bearer token (24-95 characters) <input name="mcp_token" type="password" minlength="24" maxlength="95" autocomplete="new-password" placeholder="Leave blank to keep saved token"></label>

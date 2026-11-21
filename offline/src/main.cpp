@@ -85,6 +85,7 @@ uint32_t lastClockSync = 0;
 // Low-duty-cycle synthetic cat voice; no microphone or general speech synthesis.
 uint32_t nextCatSoundAt = 0;
 String clipbotTtsBase;
+String clipbotTtsToken;
 bool clipbotTtsOn = false;
 char clipbotSpeechQueue[192] = {};
 
@@ -521,6 +522,7 @@ void saveSettings() {
   prefs.putString("mcpTok", mcpToken);
 #if defined(LUCY_CLIPBOT_C3)
   prefs.putString("ttsUrl", clipbotTtsBase);
+  prefs.putString("ttsToken", clipbotTtsToken);
   prefs.putBool("ttsOn", clipbotTtsOn);
 #endif
   display.setContrast(brightness * 255 / 100);
@@ -562,6 +564,7 @@ void loadSettings() {
   mcpEnabled = prefs.getBool("mcpOn", false) && mcpToken.length() >= 24;
 #if defined(LUCY_CLIPBOT_C3)
   clipbotTtsBase = prefs.getString("ttsUrl", "");
+  clipbotTtsToken = prefs.getString("ttsToken", "");
   clipbotTtsOn = prefs.getBool("ttsOn", false);
 #endif
 }
@@ -665,7 +668,7 @@ static void clipbotServiceSpeech() {
   char text[sizeof(clipbotSpeechQueue)];
   strcpy(text, clipbotSpeechQueue);
   clipbotSpeechQueue[0] = 0;
-  if (!clipbotTtsOn || !clipbotTtsBase.startsWith("http://") ||
+  if (!clipbotTtsOn || !(clipbotTtsBase.startsWith("http://") || clipbotTtsBase.startsWith("https://")) ||
       !clipbotCanSpeak()) {
     Serial.println("Clipbot: reply shown on OLED; speech gateway disabled/unreachable.");
     return;
@@ -674,7 +677,7 @@ static void clipbotServiceSpeech() {
   if (url.endsWith("/")) url.remove(url.length()-1);
   url += "/tts?text=";
   url += clipbotEncodeText(text);
-  const bool success = speakerSpeakPcm16Url(url);
+  const bool success = speakerSpeakPcm16Url(url, clipbotTtsToken);
   Serial.println(success ? "Clipbot: spoken reply complete" :
                 "Clipbot: speech failed; reply remains visible on OLED");
 }
@@ -1611,8 +1614,10 @@ static void handleSettingsSave() {
   const bool nextMcpOn = webServer.arg("mcp_enabled") == "1";
 #if defined(LUCY_CLIPBOT_C3)
   String nextTtsUrl = webServer.arg("tts_url");
+  String nextTtsToken = webServer.arg("tts_token");
   const bool nextTtsOn = webServer.arg("tts_enabled") == "1";
-  if ((nextTtsOn && !nextTtsUrl.startsWith("http://")) || nextTtsUrl.length() > 95 ||
+  if ((nextTtsOn && !(nextTtsUrl.startsWith("http://") || nextTtsUrl.startsWith("https://"))) ||
+      nextTtsToken.length() > 95 || nextTtsUrl.length() > 95 ||
       nextTtsUrl.indexOf('@') >= 0 || nextTtsUrl.indexOf('?') >= 0 ||
       nextTtsUrl.indexOf('#') >= 0 || nextTtsUrl.indexOf(' ') >= 0) {
     invalid("TTS requires a local HTTP URL without query or credentials."); return;
@@ -1656,6 +1661,7 @@ static void handleSettingsSave() {
   mcpEnabled = nextMcpOn;
 #if defined(LUCY_CLIPBOT_C3)
   clipbotTtsBase = nextTtsUrl;
+  if (nextTtsToken.length()) clipbotTtsToken = nextTtsToken;
   clipbotTtsOn = nextTtsOn;
 #endif
   saveSettings();
@@ -1751,6 +1757,7 @@ static void wifiLoop() {
       Serial.print(WiFi.RSSI());
       Serial.println(" dBm)");
 #if defined(LUCY_CLIPBOT_C3)
+      configTime(0, 0, "pool.ntp.org", "time.google.com");
       // Play greeting only after station Wi-Fi is connected.
       speakerGreeting();
 #endif

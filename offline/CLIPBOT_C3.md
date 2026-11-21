@@ -83,3 +83,46 @@ speech synthesizer locally. Listening through INMP441 is a separate feature.
 For an 8-ohm 0.5 W speaker start at low volume: TTS samples are digitally
 attenuated by `volume / 200`. The actual acoustic/electrical power remains
 unverified.
+
+## PC-independent operating modes
+
+1. **Offline:** On loss of Wi-Fi or internet, Lucy keeps rendering the cat and
+   running the built-in keyword/intent chat. It still produces synthesized cat
+   noises without connecting to a PC, using local audio. It cannot reliably
+   answer general questions or speak arbitrary sentences with no network.
+2. **Wi-Fi + cloud:** Configure a reachable HTTPS Ollama-compatible chat gateway
+   using Lucy's existing AI model settings, plus a separate HTTPS PCM TTS gateway
+   (Clipbot Speech settings). These gateways may run on a VPS/cloud host and do
+   not require a home PC to remain powered on. They are not provisioned by the
+   firmware. Their availability, cost and correctness depend on the provider.
+3. **Local PC:** Point the same AI and TTS settings at a local computer while
+   it is available. Settings are editable through Lucy's Wi-Fi web interface
+   and are persisted in NVS. Switch back to cloud URLs when leaving that LAN.
+
+### Remote voice gateway (no home PC)
+
+Run `tools/clipbot_tts_server.py` on a trusted Linux VPS with Python,
+FFmpeg and `edge-tts`, set the `CLIPBOT_TTS_TOKEN` environment variable
+to a long random secret, and place Caddy or another correctly configured
+reverse proxy in front of localhost:8765 to provide HTTPS and a certificate
+that chains to ISRG Root X1. Enter the public `https://...` endpoint and
+the token in Lucy's web Settings. The firmware validates the TLS certificate;
+it does not disable certificate checks. NTP synchronization is required before
+HTTPS requests. Keep the cloud server updated; avoid exposing port 8765.
+
+The `/tts?text=` URL includes the reply in the HTTPS request URI. The token
+is sent as `X-Clipbot-Token`. Be mindful of URL logging and provider privacy.
+The current service obtains synthesized audio from an internet TTS provider;
+therefore it is not an offline-only solution.
+
+**No permanent remote chat-control channel is included.** The web console
+remains a LAN/Clipbot-AP interface. Reaching the device from another network
+requires a separate authenticated cloud-relay design. Do not forward ESP32
+port 80 to the internet.
+
+### MicroDuck architecture reference
+
+Pollen Robotics/Hugging Face's MicroDuck runs on a Rockchip RK3566 Linux board,
+not ESP32-C3. Its updater, control daemons, speech and remote-access designs
+are architectural references only. No MicroDuck binary or servo/ONNX Linux
+runtime has been merged here.

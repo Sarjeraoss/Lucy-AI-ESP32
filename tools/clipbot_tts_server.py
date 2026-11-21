@@ -8,14 +8,19 @@ import subprocess
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+import hmac
 import edge_tts
 
 HOST = os.environ.get("CLIPBOT_TTS_HOST", "0.0.0.0")
 PORT = int(os.environ.get("CLIPBOT_TTS_PORT", "8765"))
 VOICE = os.environ.get("CLIPBOT_TTS_VOICE", "en-US-AriaNeural")
+TOKEN = os.environ.get("CLIPBOT_TTS_TOKEN", "")
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if TOKEN and not hmac.compare_digest(self.headers.get("X-Clipbot-Token", ""), TOKEN):
+            self.send_error(401, "Valid TTS token required")
+            return
         u = urlparse(self.path)
         if u.path != "/tts":
             self.send_error(404)
@@ -48,5 +53,7 @@ class Handler(BaseHTTPRequestHandler):
             except OSError: pass
 
 if __name__ == "__main__":
+    if not TOKEN and HOST not in ("127.0.0.1", "::1", "localhost"):
+        raise SystemExit("Set CLIPBOT_TTS_TOKEN for network-accessible deployments")
     print(f"Clipbot TTS listening on {HOST}:{PORT}")
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
