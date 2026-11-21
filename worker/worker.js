@@ -58,7 +58,7 @@ export default {
     const cors=ALLOWED_ORIGINS.has(origin)?{
       "Access-Control-Allow-Origin":origin,
       "Access-Control-Allow-Methods":"POST,OPTIONS",
-      "Access-Control-Allow-Headers":"Content-Type",
+      "Access-Control-Allow-Headers":"Content-Type,x-lucy-token",
       "Vary":"Origin"
     }:{};
     if(browser && !ALLOWED_ORIGINS.has(origin))return json({error:"Forbidden origin"},403);
@@ -78,12 +78,14 @@ export default {
       return json({models:[{name:model,model}]});
     }
     if(request.method!=="POST")return json({error:"POST required"},405,cors);
-    if(!request.headers.get("content-type")?.toLowerCase().split(";")[0].trim().includes("application/json"))return json({error:"JSON required"},415,cors);
+    if(request.headers.get("content-type")?.toLowerCase().split(";")[0].trim()!=="application/json")return json({error:"JSON required"},415,cors);
     if(Number(request.headers.get("content-length")||0)>16000)return json({error:"Request too large"},413,cors);
     // Per-identity, per-location limiter. Not a hard spending cap.
     if(!env.LUCY_RATE_LIMITER)return json({error:"Rate limiting not configured"},503,cors);
     const identity=device?"device":(request.headers.get("CF-Connecting-IP")||"unknown");
-    const allowed=await env.LUCY_RATE_LIMITER.limit({key:(device?"device:":"browser:")+identity});
+    let allowed;
+    try { allowed=await env.LUCY_RATE_LIMITER.limit({key:(device?"device:":"browser:")+identity}); }
+    catch { return json({error:"Rate limiting unavailable"},503,cors); }
     if(!allowed.success)return json({error:"Too many requests"},429,cors);
     let parsed;
     try {

@@ -60,3 +60,9 @@ sandbox.setTimeout=(fn)=>setTimeout(fn,1);
 sandbox.fetch=async(url,opts)=>new Promise((resolve,reject)=>opts.signal.addEventListener('abort',()=>reject(new DOMException('timeout','AbortError'))));
 await status('/api/chat','POST',{messages:[{role:'user',content:'x'}]},auth,504);
 console.log('Worker abort/timeout test passed.');
+
+await status('/api/chat','POST',{messages:[{role:'user',content:'x'}]},{...auth,'Content-Type':'application/json-invalid'},415);
+await status('/api/chat','POST',{messages:[{role:'user',content:'x'}]},auth,503,{LUCY_RATE_LIMITER:{limit:async()=>{throw Error('limiter failure')}}});
+const preflight=await sandbox.handler.fetch(req('/','OPTIONS',null,{Origin:'http://192.168.4.1'}),env);
+assert.match(preflight.headers.get('Access-Control-Allow-Headers'),/x-lucy-token/);
+console.log('Authenticated browser preflight and limiter-failure tests passed.');
