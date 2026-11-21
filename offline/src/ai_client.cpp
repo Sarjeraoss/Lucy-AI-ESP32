@@ -19,6 +19,7 @@
 
 #include "ai_api.h"
 #include "tls_root_ca.h"
+#include "lucy_cloud_config.h"
 
 namespace {
 
@@ -29,10 +30,10 @@ constexpr size_t AI_BOT_MAX = 512;
 constexpr int AI_HISTORY = 3;
 constexpr unsigned long RETRY_BACKOFF_MS = 30000;
 constexpr unsigned long LAN_TIMEOUT_MS = 15000;
-constexpr unsigned long CLOUD_TIMEOUT_MS = 45000;
+constexpr unsigned long CLOUD_TIMEOUT_MS = 16000;
 
 #if defined(LUCY_CLIPBOT_C3)
-char baseUrl[96] = "https://chat.blueflutex.in"; // Documented bridge URL, not guaranteed online
+char baseUrl[96] = LUCY_WORKER_URL;
 #else
 char baseUrl[96] = "http://192.168.4.2:11434";
 #endif
@@ -125,7 +126,7 @@ bool beginRequest(HTTPClient &http, WiFiClient &plain, WiFiClientSecure &secure,
 
 void addAuth(HTTPClient &http) {
 #if defined(LUCY_CLIPBOT_C3)
-  if (tokenCfg[0] != '\0') http.addHeader("X-Bridge-Token", tokenCfg);
+  if (tokenCfg[0] != '\0') http.addHeader("x-lucy-token", tokenCfg);
 #else
   if (tokenCfg[0] != '\0') http.addHeader("x-lucy-token", tokenCfg);
 #endif
@@ -174,7 +175,7 @@ const char *requestChat(const char *text) {
   WiFiClient plain;
   WiFiClientSecure secure;
 #if defined(LUCY_CLIPBOT_C3)
-  if (!beginRequest(http, plain, secure, endpoint("/chat"))) { lastStatus = 0; return nullptr; }
+  if (!beginRequest(http, plain, secure, endpoint("/api/chat"))) { lastStatus = 0; return nullptr; }
 #else
   if (!beginRequest(http, plain, secure, endpoint("/api/chat"))) { lastStatus = 0; return nullptr; }
 #endif
@@ -184,7 +185,7 @@ const char *requestChat(const char *text) {
   if (lastStatus != 200) { http.end(); return nullptr; }
   StaticJsonDocument<128> filter;
 #if defined(LUCY_CLIPBOT_C3)
-  filter["reply"] = true;
+  filter["message"]["content"] = true;
 #else
   filter["message"]["content"] = true;
 #endif
@@ -194,7 +195,7 @@ const char *requestChat(const char *text) {
   http.end();
   if (err) return nullptr;
 #if defined(LUCY_CLIPBOT_C3)
-  const char *content = response["reply"] | nullptr;
+  const char *content = response["message"]["content"] | nullptr;
 #else
   const char *content = response["message"]["content"] | nullptr;
 #endif
@@ -305,7 +306,7 @@ bool aiPing(unsigned long timeoutMs) {
   WiFiClient plain;
   WiFiClientSecure secure;
 #if defined(LUCY_CLIPBOT_C3)
-  String url = endpoint("/health");
+  String url = endpoint("/api/tags");
 #else
   String url = endpoint("/api/tags");
 #endif
