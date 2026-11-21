@@ -151,29 +151,24 @@ button:disabled{opacity:.5}.tools{display:flex;justify-content:center;gap:18px;p
 </style></head><body>
 <header><div class="logo">🤖</div><div><h1>Lucy AI</h1><small>ESP32 personal chatbot</small></div></header>
 <main>
-<section id="settings"><b>AI connection settings</b>
-<p><small>Paste your HTTPS Cloudflare Worker URL. The API key stays on the server.</small></p>
-<input id="endpoint" type="url" placeholder="https://your-worker.workers.dev" autocomplete="url">
-<button id="save" type="button">Save connection</button></section>
+
 <div id="status" class="status">ESP32 hotspot is active</div><div id="messages"></div>
 </main>
 <div class="composer"><form id="form"><input id="prompt" autocomplete="off" placeholder="Message Lucy..." maxlength="2000"><button id="send" type="submit">Send</button></form>
-<div class="tools"><a href="#" id="settingsLink">AI settings</a><a href="/wifi">Wi-Fi settings</a><a href="/logs">System logs</a><a href="/info">Diagnostics</a><a href="/update">Firmware update</a><a href="#" id="clear">Clear chat</a></div></div>
+<div class="tools"><a href="/wifi">Wi-Fi settings</a><a href="/logs">System logs</a><a href="/info">Diagnostics</a><a href="/update">Firmware update</a><a href="#" id="clear">Clear chat</a></div></div>
 <script>
 const $=id=>document.getElementById(id),messages=[],box=$("messages");let busy=false;
 function add(text,role){const d=document.createElement("div");d.className="msg "+role;d.textContent=text;box.appendChild(d);window.scrollTo(0,document.body.scrollHeight);return d}
-function getEndpoint(){return localStorage.getItem("lucy_endpoint")||""}
+const WORKER_URL="https://sparkling-fog-fdc8.vikasshu7.workers.dev";
+function getEndpoint(){return WORKER_URL}
 async function clientLog(level,message){try{await fetch("/api/client-log",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({level,message})})}catch(e){}}
-$("endpoint").value=getEndpoint();
-$("settingsLink").onclick=e=>{e.preventDefault();$("settings").style.display=$("settings").style.display==="block"?"none":"block"};
-$("save").onclick=()=>{const value=$("endpoint").value.trim();try{const u=new URL(value);if(u.protocol!=="https:"||value.includes("https://https://"))throw new Error();localStorage.setItem("lucy_endpoint",value);$("settings").style.display="none";add("AI server saved. You can start chatting now.","system");clientLog("INFO","AI Worker URL saved in browser")}catch{add("Enter one valid HTTPS Worker URL (only one https://).","system")}};
 $("clear").onclick=e=>{e.preventDefault();messages.length=0;box.innerHTML="";add("Chat cleared. How can I help?","assistant")};
-add("Hello! I'm Lucy. Configure your AI Worker URL in AI settings to begin.","assistant");
-$("form").onsubmit=async e=>{e.preventDefault();if(busy)return;const text=$("prompt").value.trim();if(!text)return;const url=getEndpoint();if(!url){$("settings").style.display="block";add("Please configure your AI Worker URL in AI settings first.","system");return}
+add("Hello! I'm Lucy. Connect Wi-Fi and start chatting.","assistant");
+$("form").onsubmit=async e=>{e.preventDefault();if(busy)return;const text=$("prompt").value.trim();if(!text)return;const url=getEndpoint();
 $("prompt").value="";add(text,"user");messages.push({role:"user",content:text});busy=true;$("send").disabled=true;const waiting=add("Lucy is thinking…","assistant");const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),45000);
 clientLog("INFO","AI request started");
 try{const response=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({messages:messages.slice(-16)}),signal:controller.signal});clientLog("INFO","AI Worker HTTP status "+response.status);const data=await response.json();if(!response.ok||typeof data.reply!=="string")throw new Error(data.error||"AI request failed ("+response.status+")");waiting.textContent=data.reply;messages.push({role:"assistant",content:data.reply});clientLog("INFO","AI response received successfully")}
-catch(err){waiting.textContent=err.name==="AbortError"?"The AI request timed out. Please try again.":"I couldn't reach the AI service: "+err.message;clientLog("ERROR",err.name==="AbortError"?"AI request timed out":err.message);if(messages.length&&messages[messages.length-1].role==="user")messages.pop()}
+catch(err){waiting.textContent="I'm offline right now, but I'm still here with you!";clientLog("ERROR",err.name==="AbortError"?"AI request timed out":err.message);if(messages.length&&messages[messages.length-1].role==="user")messages.pop()}
 finally{clearTimeout(timeout);busy=false;$("send").disabled=false;$("prompt").focus()}};
 </script></body></html>
 )HTML";

@@ -173,3 +173,31 @@ inference; this patch does not make OpenCode itself an MCP endpoint.
 Speech output still requires the separately configured TTS gateway.
 The original bridge normally runs on a PC with OpenCode; deploying the bridge
 on an always-on server is necessary to remove that dependency.
+
+## Zero-config Worker target
+
+The Clipbot SH1106 build uses the fixed Cloudflare Worker hostname
+`sparkling-fog-fdc8.vikasshu7.workers.dev`. All ordinary AI/MCP
+configuration controls are removed from the user settings UI, but the
+Serial Monitor AI commands remain for debugging. Automatic online chat
+is enabled on boot and falls back to local rules when disconnected.
+
+A separate device credential `LUCY_DEVICE_TOKEN` is injected by GitHub
+Actions using the repository secret of the same name. No actual credential
+is committed. Builds without the GitHub secret will boot but cannot
+authenticate to the Worker. The same secret must be configured in
+Cloudflare for the `sparkling-fog-fdc8` Worker.
+
+**This shared token is extractable from shipped firmware**: keep these
+builds personal/private; use per-device credentials and revocation before
+wider distribution. Never bake OpenAI API keys in firmware. The current
+Worker still needs to be deployed with Wrangler; a GitHub commit does
+not update a live Cloudflare deployment.
+
+Classic ESP32 web chat has a fixed Worker URL and no AI URL settings.
+It displays a basic fallback phrase if internet/browser access fails.
+That is not equivalent to the C3's on-device offline language engine.
+
+The C3's TLS verification uses `offline/src/tls_root_ca.h`; validate
+the deployed workers.dev chain across Cloudflare edges. Do not enable
+`AI insecure on` for a production device.
