@@ -17,3 +17,12 @@ offline/src/lucy_device_config.h
 .pio/
 .wrangler/
 src/lucy_device_config.h
+
+gateway/opencode-adapter.json
+gateway/.lucy-opencode-session
+gateway/gateway.log
+gateway/gateway.err.log
+.opencode/
+
+
+gateway/.lucy-opencode-iceman-session

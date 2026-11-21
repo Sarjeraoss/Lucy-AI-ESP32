@@ -133,7 +133,7 @@ void addAuth(HTTPClient &http) {
 }
 
 const char *requestChat(const char *text) {
-  if (!networkReady() || (usesTls() && time(nullptr) < 1704067200)) { lastStatus = 0; return nullptr; }
+  if (!networkReady() || (usesTls() && time(nullptr) < 1704067200)) { Serial.println("AI chat: network or TLS clock not ready"); lastStatus = 0; return nullptr; }
   String body;
   body.reserve(1024);
 #if defined(LUCY_CLIPBOT_C3)
@@ -182,6 +182,7 @@ const char *requestChat(const char *text) {
   http.addHeader("Content-Type", "application/json");
   addAuth(http);
   lastStatus = http.POST((uint8_t *)body.c_str(), body.length());
+  Serial.printf("AI chat: HTTP %d\n", lastStatus.load());
   if (lastStatus != 200) { http.end(); return nullptr; }
   StaticJsonDocument<128> filter;
 #if defined(LUCY_CLIPBOT_C3)
@@ -216,13 +217,13 @@ void chatTask(void *) {
   vTaskDelete(nullptr);
 }
 const char *chatWithUi(const char *text) {
-  if (chatBusy || !networkReady()) return nullptr;
+  if (chatBusy || !networkReady()) { Serial.println("AI chat: busy or network unavailable"); return nullptr; }
   if (!completed) completed = xQueueCreate(1, sizeof(bool));
-  if (!completed || ESP.getFreeHeap() < 80000) return nullptr;
+  if (!completed || ESP.getFreeHeap() < 80000) { Serial.printf("AI chat: insufficient memory (%u bytes free)\n", ESP.getFreeHeap()); return nullptr; }
   strncpy(pendingText, text, sizeof(pendingText)-1);
   pendingText[sizeof(pendingText)-1] = 0;
   chatBusy = true;
-  if (xTaskCreate(chatTask, "lucy-chat", 12288, nullptr, 1, nullptr) != pdPASS) chatBusy = false;
+  if (xTaskCreate(chatTask, "lucy-chat", 12288, nullptr, 1, nullptr) != pdPASS) { chatBusy = false; Serial.println("AI chat: task allocation failed"); }
   return nullptr;
 }
 }

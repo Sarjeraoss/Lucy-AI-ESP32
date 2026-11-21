@@ -521,9 +521,7 @@ void saveSettings() {
   prefs.putString("aiHost", aiUrl());
   prefs.putUShort("aiPort", 0);
   prefs.putString("aiModel", aiModel());
-#if !defined(LUCY_CLIPBOT_C3)
   prefs.putString("aiTok", aiToken());
-#endif
   prefs.putBool("aiIns", aiInsecure());
   prefs.putString("wifiSsid", wifiSsid);
   prefs.putString("wifiPass", wifiPass);
@@ -549,7 +547,7 @@ void loadSettings() {
   if (stored <= 2) language = static_cast<Language>(stored);
   soundEnabled = prefs.getBool("sound", false);
 #if defined(LUCY_CLIPBOT_C3)
-  aiEnabled = true;
+  aiEnabled = prefs.getBool("aiOn", true);
 #else
   aiEnabled = prefs.getBool("aiOn", false);
 #endif
@@ -1236,8 +1234,8 @@ void handleAiCommand(const char *line) {
     Serial.print("  endpoint: ");
     Serial.println(aiUrl());
 #if defined(LUCY_CLIPBOT_C3)
-    Serial.println("  online brain: Cloudflare Worker (/api/chat)");
-    Serial.println("  AI model: configured on Worker");
+    Serial.println("  online brain: configured AI gateway (/api/chat)");
+    Serial.println("  AI model: selected by OpenCode adapter");
 #else
     Serial.print("  model:    ");
     Serial.println(aiModel());
@@ -1272,7 +1270,7 @@ void handleAiCommand(const char *line) {
     aiClearRetry();
     saveSettings();
 #if defined(LUCY_CLIPBOT_C3)
-    Serial.println("AI on: OpenCode bridge online, local fallback if unavailable.");
+    Serial.println("AI on: configured bridge enabled, local fallback if unavailable.");
 #else
     Serial.println("AI: on. Chat uses the PC model when reachable, local brain otherwise.");
 #endif
@@ -1316,7 +1314,7 @@ void handleAiCommand(const char *line) {
     aiClearRetry();
     saveSettings();
 #if defined(LUCY_CLIPBOT_C3)
-    Serial.println("Clipbot model selection is managed by OpenCode bridge config.json.");
+    Serial.println("Clipbot model selection is managed by gateway/opencode-adapter.json.");
 #else
     Serial.print("AI: model ");
     Serial.println(aiModel());
@@ -1709,15 +1707,12 @@ static void handleSettingsSave() {
   wifiSsid = nextSsid; wifiPass = nextPass; wifiEnabled = nextWifiOn;
   apSsid = nextAp; apPass = nextApPass; apEnabled = nextApOn;
 #if defined(LUCY_CLIPBOT_C3)
-  aiEnabled = true;
-  aiSetUrl(LUCY_WORKER_URL);
-  aiSetModel("gpt-4o-mini");
-  aiSetToken(LUCY_DEVICE_TOKEN);
+  // Preserve the provisioned AI bridge when changing display/network settings.
 #else
   aiEnabled = webServer.arg("ai_enabled") == "1";
   aiSetUrl(nextUrl.c_str()); aiSetModel(nextModel.c_str());
 #endif
-  savedModel = nextModel; modelChoice = aiEnabled ? 1 : 0;
+  savedModel = aiModel(); modelChoice = aiEnabled ? 1 : 0;
 #if !defined(LUCY_CLIPBOT_C3)
   if (nextToken.length()) aiSetToken(nextToken.c_str());
   if (nextMcp.length()) mcpToken = nextMcp;
@@ -1939,10 +1934,9 @@ void setup() {
   loadSettings();
   aiSetLanguage(static_cast<uint8_t>(language));
 #if defined(LUCY_CLIPBOT_C3)
-  aiEnabled = true;
-  aiSetUrl(LUCY_WORKER_URL);
-  aiSetModel("gpt-4o-mini");
-  aiSetToken(LUCY_DEVICE_TOKEN);
+  if (!prefs.isKey("aiUrl")) aiSetUrl(LUCY_WORKER_URL);
+  if (!prefs.isKey("aiModel")) aiSetModel(LUCY_DEFAULT_MODEL);
+  if (!prefs.isKey("aiTok")) aiSetToken(LUCY_DEVICE_TOKEN);
   aiSetInsecureTls(false);
 #endif
   savedModel = aiModel();

@@ -1,0 +1,16 @@
+{
+  "port": 8788,
+  "bind": "127.0.0.1",
+  "token": "replace-with-a-long-random-device-token",
+  "opencodeUrl": "http://127.0.0.1:4096",
+  "opencodeUser": "opencode",
+  "opencodePassword": "replace-with-OPENCODE_SERVER_PASSWORD",
+  "agent": "lucy",
+  "model": "opencode/iceman-free",
+  "timeoutMs": 12000,
+  "maxBodyBytes": 16000,
+  "maxMessages": 16,
+  "maxCharsPerMessage": 2000,
+  "maxTotalChars": 12000,
+  "sessionFile": ".lucy-opencode-session"
+}
