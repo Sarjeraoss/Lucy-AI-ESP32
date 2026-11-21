@@ -32,7 +32,11 @@ static constexpr uint8_t PIN_SD_CS = 13; // avoids GPIO5 boot-strapping interact
 static constexpr uint32_t DEBOUNCE_MS = 35;
 static constexpr uint32_t IDLE_RETURN_MS = 15000;
 
+#if defined(LUCY_CLIPBOT_C3)
+U8G2_SH1106_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
+#else
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
+#endif
 RTC_DS3231 rtc;
 Preferences prefs;
 
@@ -592,8 +596,14 @@ void showHome() {
 
 void serviceCompanion() {
   speakerTick();
+#if defined(LUCY_CLIPBOT_C3)
+  // Keep the amplifier silent during Wi-Fi setup and reconnection.
+  if (catPlayer.tick(millis()) && screen == Screen::HOME && WiFi.status() == WL_CONNECTED)
+    speakerCat(catPlayer.clip / cat::VARIANTS, catPlayer.clip % cat::VARIANTS);
+#else
   if (catPlayer.tick(millis()) && screen == Screen::HOME)
     speakerCat(catPlayer.clip / cat::VARIANTS, catPlayer.clip % cat::VARIANTS);
+#endif
   if (screen == Screen::HOME && millis() - lastFrame >= 80) {
     lastFrame = millis();
     showHome();
@@ -1421,6 +1431,12 @@ static void handleWebSay() {
 static void applyNetwork() {
   const bool sta = wifiEnabled && wifiSsid.length();
   WiFi.mode(apEnabled ? (sta ? WIFI_AP_STA : WIFI_AP) : (sta ? WIFI_STA : WIFI_OFF));
+#if defined(LUCY_CLIPBOT_C3)
+  // Preserve the TX-power setting used by the tested Clipbot Wi-Fi firmware.
+  if (apEnabled || sta) {
+    if (!WiFi.setTxPower(WIFI_POWER_8_5dBm)) Serial.println("Clipbot: Wi-Fi TX power setting failed");
+  }
+#endif
   if (apEnabled) WiFi.softAP(apSsid.c_str(), apPass.length() ? apPass.c_str() : nullptr);
   if (sta) {
     WiFi.setAutoReconnect(true);
@@ -1615,6 +1631,10 @@ static void wifiLoop() {
       Serial.print(" (");
       Serial.print(WiFi.RSSI());
       Serial.println(" dBm)");
+#if defined(LUCY_CLIPBOT_C3)
+      // Play greeting only after station Wi-Fi is connected.
+      speakerGreeting();
+#endif
       aiClearRetry(); // let chat retry immediately
     } else {
       Serial.println("WiFi: connection lost; retrying in the background");
@@ -1652,7 +1672,9 @@ void setup() {
   display.setContrast(brightness * 255 / 100);
   speakerBegin(volume);
   battery.begin();
+#if !defined(LUCY_CLIPBOT_C3)
   speakerGreeting();
+#endif
   showBoot(1, 5);
 
   rtcReady = rtc.begin();
@@ -1698,7 +1720,7 @@ void setup() {
   Serial.println("AI: AI | AI on|off | AI url <http(s)://...> | AI host <ip> [port]");
   Serial.println("    AI token <secret> | AI insecure on|off | AI model <name>");
   Serial.println("WiFi: WIFI <ssid> [password] | WIFI status | WIFI off   (2.4 GHz only)");
-  // Keep the greeting visible/audible while completing actual initialization.
+  // Preserve the boot animation; Clipbot waits to greet until Wi-Fi connects.
   while (millis() - bootAt < 4300 || speakerBusy()) {
     speakerTick();
     if (millis() - lastFrame >= 80) { lastFrame = millis(); showBoot(5, 5); }
