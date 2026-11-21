@@ -5,8 +5,8 @@
 const fs=require('node:fs');
 const path=require('node:path');
 const secret=process.env.LUCY_DEVICE_TOKEN||'';
-if(secret.length<24||secret.length>95||/[\r\n]/.test(secret)) {
- console.error('LUCY_DEVICE_TOKEN must be 24-95 chars without line breaks.');
+if(secret.length<24||secret.length>95||/[^!-~]/.test(secret)) {
+ console.error('LUCY_DEVICE_TOKEN must be 24-95 visible non-space ASCII characters.');
  process.exit(1);
 }
 const target=path.join(__dirname,'..','offline','src','lucy_device_config.h');

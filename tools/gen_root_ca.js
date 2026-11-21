@@ -22,7 +22,7 @@ const { X509Certificate } = require('crypto');
 const host = process.argv[2] || 'sparkling-fog-fdc8.vikasshu7.workers.dev';
 const wanted = process.argv.slice(3);
 if (wanted.length === 0) {
-  wanted.push('ISRG Root X1', 'GTS Root R1', 'DigiCert Global Root G2');
+  wanted.push('ISRG Root X1', 'ISRG Root X2', 'GTS Root R1', 'GTS Root R4', 'DigiCert Global Root G2');
 }
 
 const found = new Map();

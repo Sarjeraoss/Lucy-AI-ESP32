@@ -15,6 +15,8 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <string.h>
+#include <time.h>
+#include <atomic>
 #include <ArduinoJson.h>
 
 #include "ai_api.h"
@@ -30,7 +32,7 @@ constexpr size_t AI_BOT_MAX = 512;
 constexpr int AI_HISTORY = 3;
 constexpr unsigned long RETRY_BACKOFF_MS = 30000;
 constexpr unsigned long LAN_TIMEOUT_MS = 15000;
-constexpr unsigned long CLOUD_TIMEOUT_MS = 16000;
+constexpr unsigned long CLOUD_TIMEOUT_MS = 26000;
 
 #if defined(LUCY_CLIPBOT_C3)
 char baseUrl[96] = LUCY_WORKER_URL;
@@ -38,13 +40,14 @@ char baseUrl[96] = LUCY_WORKER_URL;
 char baseUrl[96] = "http://192.168.4.2:11434";
 #endif
 char modelCfg[40] = "qwen2.5:7b";
-uint8_t replyLanguage = 0;
+std::atomic<uint8_t> replyLanguage{0};
 char tokenCfg[96] = "";
-bool insecureTls = false;
+QueueHandle_t completed = nullptr;
+bool chatBusy = false;
+char pendingText[AI_USER_MAX];
 
 unsigned long retryAt = 0;
-int lastStatus = 0;
-void (*idleHook)() = nullptr;
+std::atomic<int> lastStatus{0};
 char outBuf[AI_OUT_MAX];
 
 // Rolling history so the model can follow a short conversation.
@@ -105,11 +108,8 @@ void pushHistory(const char *user, const char *bot) {
 bool beginRequest(HTTPClient &http, WiFiClient &plain, WiFiClientSecure &secure,
                   const String &url) {
   if (usesTls()) {
-    if (insecureTls) {
-      secure.setInsecure();
-    } else {
-      secure.setCACert(LUCY_ROOT_CA);
-    }
+    secure.setCACert(LUCY_ROOT_CA);
+    secure.setHandshakeTimeout(10);
     if (!http.begin(secure, url)) return false;
     http.setTimeout(CLOUD_TIMEOUT_MS);
     http.setConnectTimeout(10000);
@@ -133,12 +133,12 @@ void addAuth(HTTPClient &http) {
 }
 
 const char *requestChat(const char *text) {
-  if (!networkReady()) { lastStatus = 0; return nullptr; }
+  if (!networkReady() || (usesTls() && time(nullptr) < 1704067200)) { lastStatus = 0; return nullptr; }
   String body;
   body.reserve(1024);
 #if defined(LUCY_CLIPBOT_C3)
-  // Use exactly the OpenCode bridge protocol. Model routing is on the server.
-  body += "{\"messages\":[";
+  // Worker keeps the model fixed and returns an Ollama-compatible reply.
+  body += "{\"stream\":false,\"messages\":[";
   for (int i = 0; i < histCount; ++i) {
     if (i) body += ",";
     body += "{\"role\":\"user\",\"content\":\"";
@@ -209,26 +209,26 @@ const char *requestChat(const char *text) {
 } // namespace
 
 namespace {
-struct ChatJob { const char *text; const char *reply; TaskHandle_t caller; };
-void chatTask(void *context) {
-  auto *job = static_cast<ChatJob *>(context);
-  job->reply = requestChat(job->text);
-  xTaskNotifyGive(job->caller);
+void chatTask(void *) {
+  const char *reply = requestChat(pendingText);
+  bool ok = reply != nullptr;
+  xQueueSend(completed, &ok, portMAX_DELAY);
   vTaskDelete(nullptr);
 }
 const char *chatWithUi(const char *text) {
-  if (!networkReady()) return nullptr;
-  ChatJob job{text, nullptr, xTaskGetCurrentTaskHandle()};
-  // Leave enough heap for mbedTLS as well as the UI and network stacks.
-  if (ESP.getFreeHeap() < 80000 || xTaskCreate(chatTask, "lucy-chat", 12288, &job, 1, nullptr) != pdPASS) return nullptr;
-  while (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(4)) == 0) {
-    if (idleHook) idleHook();
-  }
-  return job.reply;
+  if (chatBusy || !networkReady()) return nullptr;
+  if (!completed) completed = xQueueCreate(1, sizeof(bool));
+  if (!completed || ESP.getFreeHeap() < 80000) return nullptr;
+  strncpy(pendingText, text, sizeof(pendingText)-1);
+  pendingText[sizeof(pendingText)-1] = 0;
+  chatBusy = true;
+  if (xTaskCreate(chatTask, "lucy-chat", 12288, nullptr, 1, nullptr) != pdPASS) chatBusy = false;
+  return nullptr;
 }
 }
 
 void aiSetUrl(const char *url) {
+  if (chatBusy) return;
   if (url != nullptr && url[0] != '\0') {
     strncpy(baseUrl, url, sizeof(baseUrl) - 1);
     baseUrl[sizeof(baseUrl) - 1] = '\0';
@@ -251,6 +251,7 @@ void aiSetEndpoint(const char *host, uint16_t port) {
 }
 
 void aiSetModel(const char *model) {
+  if (chatBusy) return;
   if (model != nullptr && model[0] != '\0') {
     strncpy(modelCfg, model, sizeof(modelCfg) - 1);
     modelCfg[sizeof(modelCfg) - 1] = '\0';
@@ -260,6 +261,7 @@ void aiSetModel(const char *model) {
 void aiSetLanguage(uint8_t language) { replyLanguage = language <= 2 ? language : 0; }
 
 void aiSetToken(const char *token) {
+  if (chatBusy) return;
   if (token == nullptr) return;
   strncpy(tokenCfg, token, sizeof(tokenCfg) - 1);
   tokenCfg[sizeof(tokenCfg) - 1] = '\0';
@@ -267,20 +269,20 @@ void aiSetToken(const char *token) {
 }
 
 void aiSetInsecureTls(bool insecure) {
-  insecureTls = insecure;
+  (void)insecure;
   retryAt = 0;
 }
 
 const char *aiUrl() { return baseUrl; }
 const char *aiModel() { return modelCfg; }
 const char *aiToken() { return tokenCfg; }
-bool aiInsecure() { return insecureTls; }
+bool aiInsecure() { return false; }
 size_t aiTokenLength() { return strlen(tokenCfg); }
 bool aiUsesTls() { return usesTls(); }
 int aiLastStatus() { return lastStatus; }
 
 void aiClearRetry() { retryAt = 0; }
-void aiSetIdleHook(void (*hook)()) { idleHook = hook; }
+void aiSetIdleHook(void (*hook)()) { (void)hook; }
 
 const char *aiReply(const char *text) {
   if (text == nullptr || text[0] == '\0') return nullptr;
@@ -297,6 +299,7 @@ const char *aiReply(const char *text) {
 }
 
 bool aiPing(unsigned long timeoutMs) {
+  if (chatBusy) return false;
   if (!networkReady()) {
     lastStatus = 0;
     return false;
@@ -311,8 +314,8 @@ bool aiPing(unsigned long timeoutMs) {
   String url = endpoint("/api/tags");
 #endif
   if (usesTls()) {
-    if (insecureTls) secure.setInsecure();
-    else secure.setCACert(LUCY_ROOT_CA);
+    secure.setCACert(LUCY_ROOT_CA);
+    secure.setHandshakeTimeout(10);
     if (!http.begin(secure, url)) return false;
   } else {
     if (!http.begin(plain, url)) return false;
@@ -326,3 +329,14 @@ bool aiPing(unsigned long timeoutMs) {
   http.end();
   return lastStatus == 200;
 }
+
+// Consume on the main task: queue receive synchronizes access to reply/history.
+const char *aiPollReply(const char **text) {
+  bool ok=false;
+  if (!chatBusy || xQueueReceive(completed, &ok, 0) != pdTRUE) return nullptr;
+  chatBusy=false;
+  retryAt=ok?0:millis()+RETRY_BACKOFF_MS;
+  *text=pendingText;
+  return ok?outBuf:nullptr;
+}
+bool aiBusy() { return chatBusy; }

@@ -3,7 +3,7 @@
 // Deployed worker: sparkling-fog-fdc8.vikasshu7.workers.dev
 const ALLOWED_ORIGINS = new Set(["http://192.168.4.1", "http://edsoft.local"]);
 const DEFAULT_MODEL = "gpt-4o-mini";
-const PROMPT = "You are Lucy, a friendly, accurate virtual cat companion on a tiny display. Respond to the user's question in one to three short sentences, using plain text without Markdown. When uncertain, say so. Prefer romanized Marathi or Hindi if asked, because the display has limited glyphs. Do not pretend to know current events without a source.";
+const PROMPT = "You are Lucy, a friendly, accurate virtual cat companion on a tiny display. Respond to the user's question in one to three short sentences, using plain ASCII text without Markdown and under 40 words. When uncertain, say so. Prefer romanized Marathi or Hindi if asked, because the display has limited glyphs. Do not pretend to know current events without a source.";
 const JSON_HEADERS = {"Content-Type": "application/json; charset=utf-8", "Cache-Control":"no-store", "X-Content-Type-Options":"nosniff"};
 const json = (value, status=200, extra={})=>Response.json(value,{status,headers:{...JSON_HEADERS,...extra}});
 function validMessages(v) {
@@ -68,7 +68,7 @@ export default {
     }
     const device=route==="/api/chat"||route==="/api/tags";
     if(!browser&&!device)return json({error:"Not found"},404);
-    if(device) {
+    if(device || (browser && env.ALLOW_LEGACY_BROWSER !== "true")) {
       if(!env.LUCY_DEVICE_TOKEN||env.LUCY_DEVICE_TOKEN.length<24)return json({error:"Device authentication is not configured"},503);
       if(!await equalSecret(request.headers.get("x-lucy-token"),env.LUCY_DEVICE_TOKEN))return json({error:"Unauthorized"},401);
     }
@@ -78,7 +78,7 @@ export default {
       return json({models:[{name:model,model}]});
     }
     if(request.method!=="POST")return json({error:"POST required"},405,cors);
-    if(!request.headers.get("content-type")?.toLowerCase().includes("application/json"))return json({error:"JSON required"},415,cors);
+    if(!request.headers.get("content-type")?.toLowerCase().split(";")[0].trim().includes("application/json"))return json({error:"JSON required"},415,cors);
     if(Number(request.headers.get("content-length")||0)>16000)return json({error:"Request too large"},413,cors);
     // Per-identity, per-location limiter. Not a hard spending cap.
     if(!env.LUCY_RATE_LIMITER)return json({error:"Rate limiting not configured"},503,cors);
@@ -86,7 +86,20 @@ export default {
     const allowed=await env.LUCY_RATE_LIMITER.limit({key:(device?"device:":"browser:")+identity});
     if(!allowed.success)return json({error:"Too many requests"},429,cors);
     let parsed;
-    try {parsed=await request.json();}catch{return json({error:"Invalid JSON"},400,cors);}
+    try {
+      const reader=request.body?.getReader();
+      if(!reader) return json({error:"Invalid JSON"},400,cors);
+      const chunks=[]; let size=0;
+      while(true) { const {done,value}=await reader.read(); if(done)break;
+        size+=value.byteLength;
+        if(size>16000){await reader.cancel();return json({error:"Request too large"},413,cors);}
+        chunks.push(value);
+      }
+      const bytes=new Uint8Array(size);let offset=0;
+      for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
+      parsed=JSON.parse(new TextDecoder().decode(bytes));
+    }catch{return json({error:"Invalid JSON"},400,cors);}
+    if(parsed?.stream===true)return json({error:"Streaming is not supported; use stream:false"},400,cors);
     const messages=validMessages(parsed?.messages);
     if(!messages)return json({error:"Invalid messages"},400,cors);
     const outcome=await generate(messages,env);

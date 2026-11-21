@@ -5,11 +5,15 @@ on:
     branches: [ offline-os-v1, "clipbot/**" ]
     paths:
       - "offline/**"
+      - "tools/gen_root_ca.js"
+      - "tools/build_security.py"
       - "tools/test_companion*"
       - ".github/workflows/build-offline-firmware.yml"
   pull_request:
     paths:
       - "offline/**"
+      - "tools/gen_root_ca.js"
+      - "tools/build_security.py"
       - ".github/workflows/build-offline-firmware.yml"
   workflow_dispatch:
 

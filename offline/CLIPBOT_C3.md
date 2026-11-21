@@ -174,30 +174,12 @@ Speech output still requires the separately configured TTS gateway.
 The original bridge normally runs on a PC with OpenCode; deploying the bridge
 on an always-on server is necessary to remove that dependency.
 
-## Zero-config Worker target
+## Zero-config Worker target (current default)
 
-The Clipbot SH1106 build uses the fixed Cloudflare Worker hostname
-`sparkling-fog-fdc8.vikasshu7.workers.dev`. All ordinary AI/MCP
-configuration controls are removed from the user settings UI, but the
-Serial Monitor AI commands remain for debugging. Automatic online chat
-is enabled on boot and falls back to local rules when disconnected.
+This supersedes the historical OpenCode bridge setup above. The Clipbot SH1106 build automatically connects to `https://sparkling-fog-fdc8.vikasshu7.workers.dev` after Wi-Fi setup, with `gpt-4o-mini` configured on the Worker. There are no ordinary-user AI/MCP settings. Serial AI commands remain for debugging; TLS verification cannot be disabled.
 
-A separate device credential `LUCY_DEVICE_TOKEN` is injected only
-during a private local build, not by public GitHub Actions. No actual credential
-is committed. Builds without the GitHub secret will boot but cannot
-authenticate to the Worker. The same secret must be configured in
-Cloudflare for the `sparkling-fog-fdc8` Worker.
+Cloud requests run in a background task. The main loop keeps serving buttons, animations, web requests and OTA. Lucy gives a local fallback immediately, then updates the conversation when the cloud reply arrives. Failed requests retry on later conversation turns after a 30-second backoff. No PC, Ollama or local gateway is required for chat. Optional historical TTS integrations remain separate from this cloud chat path.
 
-**This shared token is extractable from shipped firmware**: keep these
-builds personal/private; use per-device credentials and revocation before
-wider distribution. Never bake OpenAI API keys in firmware. The current
-Worker still needs to be deployed with Wrangler; a GitHub commit does
-not update a live Cloudflare deployment.
+Both firmware variants need a private `LUCY_DEVICE_TOKEN` header generated with `node tools/write_device_token.js`; the same independent token must exist as a Worker secret. Public CI builds omit it and cannot authenticate online. Never publish private token-bearing images or embed an OpenAI key. See [the complete guide](../worker/ZERO_CONFIG.md) for provisioning, build commands, rollout blockers, security limits and physical acceptance tests.
 
-Classic ESP32 web chat has a fixed Worker URL and no AI URL settings.
-It displays a basic fallback phrase if internet/browser access fails.
-That is not equivalent to the C3's on-device offline language engine.
-
-The C3's TLS verification uses `offline/src/tls_root_ca.h`; validate
-the deployed workers.dev chain across Cloudflare edges. Do not enable
-`AI insecure on` for a production device.
+SH1106 SDA/SCL remain GPIO21/20; MAX98357A BCLK/LRC/DIN remain GPIO4/5/3. Clipbot retains two OTA slots using `min_spiffs.csv`. Verify the currently installed partition table and available slot before any OTA, and obtain explicit approval before flashing or deploying production Worker changes.

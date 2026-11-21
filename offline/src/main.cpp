@@ -821,7 +821,7 @@ void showCompanion(const char *message = nullptr) {
   }
   display.setFont(FONT_META);
   if (!message && hasChat) {
-    display.drawStr(3, 62, lastReplyFromModel ? "from PC model" : "offline brain");
+    display.drawStr(3, 62, lastReplyFromModel ? "from cloud" : "offline brain");
   } else if (!message) {
     display.drawStr(3, 62, "UP lang SEL demo");
   }
@@ -1113,7 +1113,7 @@ const char *offlineReply(const char *input) {
   normalized[n] = '\0';
 
 #if defined(LUCY_CLIPBOT_C3)
-  // The OpenCode bridge is Clipbot's sole online brain.
+  // The Cloudflare Worker is Clipbot's online brain.
   if (aiEnabled) {
     const char *reply = aiReply(input);
     if (reply != nullptr) {
@@ -1535,10 +1535,14 @@ render(new Uint8Array(1024));
 document.getElementById('up').onclick=function(){fetch('/press?btn=up');};
 document.getElementById('select').onclick=function(){fetch('/press?btn=select');};
 document.getElementById('back').onclick=function(){fetch('/press?btn=back');};
-form.onsubmit=function(e){e.preventDefault();var t=msg.value.trim();if(!t)return;say('You',t);msg.value='';fetch('/say?text='+encodeURIComponent(t)).then(function(r){return r.text();}).then(function(t){say('Lucy',t);}).catch(function(){say('Lucy','(no reply)');});};
+form.onsubmit=function(e){e.preventDefault();var t=msg.value.trim();if(!t)return;say('You',t);msg.value='';fetch('/say?text='+encodeURIComponent(t)).then(async function(r){while(r.status===202){await new Promise(function(resolve){setTimeout(resolve,250);});r=await fetch('/chat-result');}if(!r.ok)throw Error('busy');return r.text();}).then(function(t){say('Lucy',t);}).catch(function(){say('Lucy','(no reply)');});};
 </script>
 </body></html>)HTML";
 
+static void handleChatResult() {
+  if (aiBusy()) { webServer.send(202,"text/plain",""); return; }
+  webServer.send(200,"text/plain; charset=utf-8",chatReply);
+}
 static void handleWebRoot() { webServer.send_P(200, "text/html; charset=utf-8", WEB_PAGE); }
 
 static void handleWebFrame() {
@@ -1560,6 +1564,7 @@ static void handleWebPress() {
 }
 
 static void handleWebSay() {
+  if (aiBusy()) { webServer.send(409, "text/plain", "Lucy is thinking."); return; }
   String text = webServer.arg("text");
   text.trim();
   if (text.isEmpty()) { webServer.send(400, "text/plain", "empty"); return; }
@@ -1567,7 +1572,7 @@ static void handleWebSay() {
   markovLearn(text.c_str()); // same learning path as the serial console
   const char *reply = offlineReply(text.c_str());
   setChat(text.c_str(), reply);
-  webServer.send(200, "text/plain; charset=utf-8", reply);
+  webServer.send(aiBusy()?202:200, "text/plain; charset=utf-8", reply);
 #if defined(LUCY_CLIPBOT_C3)
   screen = Screen::COMPANION;
   lastInteraction = millis();
@@ -1866,6 +1871,7 @@ static void webConsoleBegin() {
   webServer.on("/mcp", HTTP_ANY, handleMcp);
   webServer.on("/frame.bin", HTTP_GET, handleWebFrame);
   webServer.on("/press", HTTP_GET, handleWebPress);
+  webServer.on("/chat-result", HTTP_GET, handleChatResult);
   webServer.on("/say", HTTP_ANY, handleWebSay);
 #if defined(LUCY_CLIPBOT_C3)
   webServer.on("/ota", HTTP_GET, clipbotOtaPage);
@@ -2038,6 +2044,17 @@ void handleRtcSetCommand(const char *line) {
 }
 
 void loop() {
+  const char *completedText = nullptr;
+  const char *completedReply = aiPollReply(&completedText);
+  if (completedReply) {
+    lastReplyFromModel = true;
+    setChat(completedText, completedReply);
+    Serial.print("Lucy: "); Serial.println(completedReply);
+#if defined(LUCY_CLIPBOT_C3)
+    clipbotQueueSpeech(completedReply);
+#endif
+    if (screen == Screen::COMPANION) showCompanion();
+  }
   pollButton(btnUp);
   pollButton(btnSelect);
   pollButton(btnBack);
