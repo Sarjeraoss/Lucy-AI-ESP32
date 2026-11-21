@@ -54,6 +54,9 @@ jobs:
               '#pragma once\n#define LUCY_DEVICE_TOKEN ' + json.dumps(secret) + '\n')
           print('Private device header prepared, credential not shown')
           PY
+      - name: Refresh Worker TLS root CA trust for Clipbot
+        if: matrix.environment == 'lucy_clipbot_c3'
+        run: node tools/gen_root_ca.js sparkling-fog-fdc8.vikasshu7.workers.dev
       - name: Build offline firmware
         working-directory: offline
         run: pio run -e ${{ matrix.environment }}

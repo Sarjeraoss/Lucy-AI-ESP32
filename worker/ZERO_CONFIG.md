@@ -42,3 +42,17 @@ Security caveat: a token embedded in firmware distributed to all users is
 extractable and shared. This is only sensible for a controlled personal
 prototype. Production zero-config requires per-device provisioning,
 token rotation, enrollment/revocation and hard spending limits.
+
+## TLS trust bundle build step
+
+For C3 builds, GitHub Actions regenerates the `LUCY_ROOT_CA` PEM
+bundle from Node's Mozilla public root trust store with ISRG Root X1,
+GTS Root R1 and DigiCert Global Root G2. The device still checks
+the certificate and hostname; insecure TLS is disabled at boot.
+
+On your Windows clone, run:
+`node tools/gen_root_ca.js sparkling-fog-fdc8.vikasshu7.workers.dev`
+before a local firmware build. The generator picks matching roots from
+Node's bundled trusted CA store but **cannot prove** which root Cloudflare
+uses for every edge certificate or validate the deployed certificate.
+Perform an actual ESP32 TLS connection test after flashing.
