@@ -53,3 +53,33 @@ saved user volume settings are retained.
 
 For the 8-ohm, 0.5 W speaker, monitor for distortion or heating. Volume is
 a firmware relative control, not a verified physical loudness/power limit.
+
+## Spoken reply integration (optional)
+
+For accurate general answers, configure a reachable **AI model server** in Lucy Settings. The
+on-device offline intent model is intentionally small and cannot answer arbitrary questions.
+A missing or unreachable AI server causes offline fallback. A TTS server changes the sound
+of a reply but does not improve factual accuracy.
+
+This Clipbot branch can stream speech to the ESP32 MAX98357A:
+- Run `python -m pip install edge-tts` on a local Windows PC, and install FFmpeg on PATH.
+- Run `python tools/clipbot_tts_server.py` on that PC. Internet access is required for Edge TTS.
+- Connect Clipbot and the PC to the same trusted Wi-Fi network.
+- On Lucy's `http://192.168.4.1/settings` page, enable **Speak text replies**,
+  and set the TTS server URL to `http://PC-LAN-IP:8765`.
+- Configure the separate Lucy AI model endpoint if you want general-question answering.
+- Send a chat message through the web console or serial. Text stays on the OLED,
+  and the ESP requests 16 kHz signed-16-bit mono PCM speech via HTTP and plays it
+  on its I2S amplifier. The server must return a Content-Length.
+- A TTS failure leaves the reply visible but cannot provide spoken audio.
+  Check Serial for diagnostics. The server binds all interfaces by default;
+  only run on a trusted LAN and block untrusted access in your PC firewall.
+
+The speech server is **not installed on ESP32**. It must remain running for
+spoken replies. Arbitrary English/Marathi/Hindi pronunciation depends on
+the chosen TTS voice; the default is English. The ESP does not run a neural
+speech synthesizer locally. Listening through INMP441 is a separate feature.
+
+For an 8-ohm 0.5 W speaker start at low volume: TTS samples are digitally
+attenuated by `volume / 200`. The actual acoustic/electrical power remains
+unverified.

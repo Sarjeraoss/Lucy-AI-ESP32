@@ -84,6 +84,10 @@ uint32_t lastClockSync = 0;
 #if defined(LUCY_CLIPBOT_C3)
 // Low-duty-cycle synthetic cat voice; no microphone or general speech synthesis.
 uint32_t nextCatSoundAt = 0;
+String clipbotTtsBase;
+bool clipbotTtsOn = false;
+char clipbotSpeechQueue[192] = {};
+
 bool clipbotNetworkReady = false;
 #endif
 uint16_t snakeScore = 0;
@@ -515,6 +519,10 @@ void saveSettings() {
   prefs.putUChar("volume", volume);
   prefs.putBool("mcpOn", mcpEnabled);
   prefs.putString("mcpTok", mcpToken);
+#if defined(LUCY_CLIPBOT_C3)
+  prefs.putString("ttsUrl", clipbotTtsBase);
+  prefs.putBool("ttsOn", clipbotTtsOn);
+#endif
   display.setContrast(brightness * 255 / 100);
   speakerVolume(volume);
 }
@@ -552,6 +560,10 @@ void loadSettings() {
   soundEnabled = volume > 0;
   mcpToken = prefs.getString("mcpTok", "");
   mcpEnabled = prefs.getBool("mcpOn", false) && mcpToken.length() >= 24;
+#if defined(LUCY_CLIPBOT_C3)
+  clipbotTtsBase = prefs.getString("ttsUrl", "");
+  clipbotTtsOn = prefs.getBool("ttsOn", false);
+#endif
 }
 
 void pollButton(Button &button) {
@@ -624,6 +636,47 @@ void clipbotVocalize(bool reply) {
   }
   speakerCat(behaviour, variant);
   nextCatSoundAt = millis() + random(9000, 17000);
+}
+#endif
+
+#if defined(LUCY_CLIPBOT_C3)
+static String clipbotEncodeText(const char* input) {
+  const char* hex = "0123456789ABCDEF";
+  String out;
+  out.reserve(strlen(input) * 3);
+  for (const unsigned char* p = reinterpret_cast<const unsigned char*>(input); *p; ++p) {
+    const uint8_t c = *p;
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~')
+      out += char(c);
+    else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
+  }
+  return out;
+}
+
+static void clipbotQueueSpeech(const char* message) {
+  if (!message || !*message) return;
+  strncpy(clipbotSpeechQueue, message, sizeof(clipbotSpeechQueue) - 1);
+  clipbotSpeechQueue[sizeof(clipbotSpeechQueue) - 1] = 0;
+}
+
+static void clipbotServiceSpeech() {
+  if (!clipbotSpeechQueue[0]) return;
+  char text[sizeof(clipbotSpeechQueue)];
+  strcpy(text, clipbotSpeechQueue);
+  clipbotSpeechQueue[0] = 0;
+  if (!clipbotTtsOn || !clipbotTtsBase.startsWith("http://") ||
+      !clipbotCanSpeak()) {
+    Serial.println("Clipbot: reply shown on OLED; speech gateway disabled/unreachable.");
+    return;
+  }
+  String url = clipbotTtsBase;
+  if (url.endsWith("/")) url.remove(url.length()-1);
+  url += "/tts?text=";
+  url += clipbotEncodeText(text);
+  const bool success = speakerSpeakPcm16Url(url);
+  Serial.println(success ? "Clipbot: spoken reply complete" :
+                "Clipbot: speech failed; reply remains visible on OLED");
 }
 #endif
 
@@ -1367,7 +1420,7 @@ void handleSerialConsole() {
 #if defined(LUCY_CLIPBOT_C3)
           screen = Screen::COMPANION;
           lastInteraction = millis();
-          clipbotVocalize(true);
+          clipbotQueueSpeech(reply);
 #endif
           if (screen == Screen::COMPANION) showCompanion();
         }
@@ -1469,7 +1522,7 @@ static void handleWebSay() {
 #if defined(LUCY_CLIPBOT_C3)
   screen = Screen::COMPANION;
   lastInteraction = millis();
-  clipbotVocalize(true);
+  clipbotQueueSpeech(reply);
 #endif
   if (screen == Screen::COMPANION) showCompanion();
 }
@@ -1522,6 +1575,10 @@ static void handleSettingsGet() {
   doc["ai_url"] = aiUrl();
   doc["ai_model"] = aiModel();
   doc["mcp_enabled"] = mcpEnabled;
+#if defined(LUCY_CLIPBOT_C3)
+  doc["tts_enabled"] = clipbotTtsOn;
+  doc["tts_url"] = clipbotTtsBase;
+#endif
   String json;
   serializeJson(doc, json);
   webServer.send(200, "application/json", json);
@@ -1552,6 +1609,15 @@ static void handleSettingsSave() {
   const bool nextWifiOn = webServer.arg("wifi_enabled") == "1";
   const bool nextApOn = webServer.arg("ap_enabled") == "1";
   const bool nextMcpOn = webServer.arg("mcp_enabled") == "1";
+#if defined(LUCY_CLIPBOT_C3)
+  String nextTtsUrl = webServer.arg("tts_url");
+  const bool nextTtsOn = webServer.arg("tts_enabled") == "1";
+  if ((nextTtsOn && !nextTtsUrl.startsWith("http://")) || nextTtsUrl.length() > 95 ||
+      nextTtsUrl.indexOf('@') >= 0 || nextTtsUrl.indexOf('?') >= 0 ||
+      nextTtsUrl.indexOf('#') >= 0 || nextTtsUrl.indexOf(' ') >= 0) {
+    invalid("TTS requires a local HTTP URL without query or credentials."); return;
+  }
+#endif
   if (nextSsid.length() > 32 || nextAp.length() < 1 || nextAp.length() > 32 ||
       nextPass.length() > 64 || nextApPass.length() > 63 ||
       (nextApPass.length() > 0 && nextApPass.length() < 8) ||
@@ -1588,6 +1654,10 @@ static void handleSettingsSave() {
   if (nextToken.length()) aiSetToken(nextToken.c_str());
   if (nextMcp.length()) mcpToken = nextMcp;
   mcpEnabled = nextMcpOn;
+#if defined(LUCY_CLIPBOT_C3)
+  clipbotTtsBase = nextTtsUrl;
+  clipbotTtsOn = nextTtsOn;
+#endif
   saveSettings();
   webServer.send(200, "text/plain", networkChanged ? "Saved. Rejoin Lucy's access point if the network changes." : "Settings saved.");
   if (networkChanged) networkApplyAt = millis() + 700;
@@ -1806,6 +1876,9 @@ void loop() {
   webConsoleLoop();
   wifiLoop();
   serviceCompanion();
+#if defined(LUCY_CLIPBOT_C3)
+  clipbotServiceSpeech();
+#endif
   battery.tick(millis());
   if (networkApplyAt && int32_t(millis() - networkApplyAt) >= 0) { networkApplyAt = 0; applyNetwork(); }
   // Flash writes are deferred until the speaker is idle.
