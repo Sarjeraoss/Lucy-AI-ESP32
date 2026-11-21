@@ -81,6 +81,11 @@ uint8_t gameIndex = 0;
 uint32_t lastInteraction = 0;
 uint32_t lastFrame = 0;
 uint32_t lastClockSync = 0;
+#if defined(LUCY_CLIPBOT_C3)
+// Low-duty-cycle synthetic cat voice; no microphone or general speech synthesis.
+uint32_t nextCatSoundAt = 0;
+bool clipbotNetworkReady = false;
+#endif
 uint16_t snakeScore = 0;
 uint8_t snakeX[48], snakeY[48], snakeLength = 3;
 int8_t snakeDx = 1, snakeDy = 0;
@@ -543,7 +548,7 @@ void loadSettings() {
   brightness = constrain(prefs.getUChar("bright", 70), 10, 100);
   volume = constrain(prefs.getUChar("volume", soundEnabled ? 50 : 0), 0, 100);
   // A fresh C3 build with an amplifier starts at a moderate volume.
-  if (!prefs.isKey("volume") && !prefs.isKey("sound")) volume = 50;
+  if (!prefs.isKey("volume") && !prefs.isKey("sound")) volume = 35;
   soundEnabled = volume > 0;
   mcpToken = prefs.getString("mcpTok", "");
   mcpEnabled = prefs.getBool("mcpOn", false) && mcpToken.length() >= 24;
@@ -594,12 +599,43 @@ void showHome() {
   display.sendBuffer();
 }
 
+#if defined(LUCY_CLIPBOT_C3)
+// Keep cat sounds silent during Wi-Fi station connection and reconnection.
+// When no station is configured, the local Lucy-Setup AP can run independently.
+bool clipbotCanSpeak() {
+  if (!clipbotNetworkReady || !speakerReady() || !volume) return false;
+  if (wifiEnabled && wifiSsid.length()) return WiFi.status() == WL_CONNECTED;
+  return true;
+}
+
+// Align a real Lucy facial animation with its synthesized cat voice.
+void clipbotVocalize(bool reply) {
+  if (!clipbotCanSpeak() || speakerBusy()) return;
+  static const uint8_t voices[] = {cat::MEOW, cat::CHIRP, cat::PURR, cat::CHATTER};
+  uint8_t behaviour = reply ? (millis() % 2 ? cat::MEOW : cat::CHIRP)
+                            : voices[random(0, 4)];
+  uint8_t variant = random(0, cat::VARIANTS);
+  // Responding to chat should not permanently disable autonomous animation.
+  if (screen == Screen::HOME) {
+    catPlayer.clip = behaviour * cat::VARIANTS + variant;
+    catPlayer.started = millis();
+    catPlayer.automatic = true;
+    showHome();
+  }
+  speakerCat(behaviour, variant);
+  nextCatSoundAt = millis() + random(9000, 17000);
+}
+#endif
+
 void serviceCompanion() {
   speakerTick();
 #if defined(LUCY_CLIPBOT_C3)
-  // Keep the amplifier silent during Wi-Fi setup and reconnection.
-  if (catPlayer.tick(millis()) && screen == Screen::HOME && WiFi.status() == WL_CONNECTED)
-    speakerCat(catPlayer.clip / cat::VARIANTS, catPlayer.clip % cat::VARIANTS);
+  // Lucy continues silent animations even before Wi-Fi is connected.
+  catPlayer.tick(millis());
+  if (screen == Screen::HOME && clipbotCanSpeak() && !speakerBusy() &&
+      int32_t(millis() - nextCatSoundAt) >= 0) {
+    clipbotVocalize(false);
+  }
 #else
   if (catPlayer.tick(millis()) && screen == Screen::HOME)
     speakerCat(catPlayer.clip / cat::VARIANTS, catPlayer.clip % cat::VARIANTS);
@@ -1328,6 +1364,11 @@ void handleSerialConsole() {
           const char *reply = offlineReply(serialLine);
           setChat(serialLine, reply);
           Serial.print("Lucy: "); Serial.println(reply);
+#if defined(LUCY_CLIPBOT_C3)
+          screen = Screen::COMPANION;
+          lastInteraction = millis();
+          clipbotVocalize(true);
+#endif
           if (screen == Screen::COMPANION) showCompanion();
         }
       }
@@ -1425,6 +1466,11 @@ static void handleWebSay() {
   const char *reply = offlineReply(text.c_str());
   setChat(text.c_str(), reply);
   webServer.send(200, "text/plain; charset=utf-8", reply);
+#if defined(LUCY_CLIPBOT_C3)
+  screen = Screen::COMPANION;
+  lastInteraction = millis();
+  clipbotVocalize(true);
+#endif
   if (screen == Screen::COMPANION) showCompanion();
 }
 
@@ -1611,6 +1657,9 @@ static void webConsoleBegin() {
   webServer.on("/press", HTTP_GET, handleWebPress);
   webServer.on("/say", HTTP_ANY, handleWebSay);
   webServer.begin();
+#if defined(LUCY_CLIPBOT_C3)
+  clipbotNetworkReady = true;
+#endif
   Serial.println("Lucy web console: http://192.168.4.1 (when AP enabled)");
 }
 
@@ -1727,6 +1776,10 @@ void setup() {
     delay(2);
   }
   catPlayer.started = millis();
+#if defined(LUCY_CLIPBOT_C3)
+  // Avoid overlapping the Wi-Fi-connected greeting with the first meow.
+  nextCatSoundAt = millis() + 7000;
+#endif
   screen = Screen::HOME;
   lastInteraction = millis();
   showHome();
