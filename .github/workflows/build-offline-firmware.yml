@@ -2,7 +2,7 @@ name: Build Lucy Offline OS firmware
 
 on:
   push:
-    branches: [ offline-os-v1 ]
+    branches: [ main, offline-os-v1 ]
     paths:
       - "offline/**"
       - "tools/test_companion*"
