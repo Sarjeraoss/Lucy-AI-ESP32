@@ -652,6 +652,9 @@ void showHome() {
 // When no station is configured, the local Lucy-Setup AP can run independently.
 bool clipbotCanSpeak() {
   if (!clipbotNetworkReady || !speakerReady() || !volume) return false;
+  // Online AI and TTS may both use a PC attached to Lucy-Setup (SoftAP).
+  // Do not require STA association when a hotspot client is connected.
+  if (WiFi.softAPgetStationNum() > 0) return true;
   if (wifiEnabled && wifiSsid.length()) return WiFi.status() == WL_CONNECTED;
   return true;
 }
