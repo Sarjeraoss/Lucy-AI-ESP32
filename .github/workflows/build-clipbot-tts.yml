@@ -1,0 +1,29 @@
+name: Build Lucy Clipbot C3 online + OLED + speech
+on:
+  push:
+    branches: [offline-os-v1]
+    paths:
+      - 'offline/**'
+      - '.github/workflows/build-clipbot-tts.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  clipbot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PlatformIO
+        run: python -m pip install platformio==6.2.0
+      - name: Build working Clipbot C3 variant
+        working-directory: offline
+        run: pio run -e lucy_clipbot_c3
+      - name: Upload app-only firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: lucy-clipbot-c3-online-oled-tts
+          path: offline/.pio/build/lucy_clipbot_c3/firmware.bin
+          retention-days: 30
