@@ -183,23 +183,32 @@ const char *requestChat(const char *text) {
   addAuth(http);
   lastStatus = http.POST((uint8_t *)body.c_str(), body.length());
   if (lastStatus != 200) { http.end(); return nullptr; }
-  StaticJsonDocument<128> filter;
-#if defined(LUCY_CLIPBOT_C3)
-  filter["message"]["content"] = true;
-#else
-  filter["message"]["content"] = true;
-#endif
-  DynamicJsonDocument response(2048);
-  const auto err = deserializeJson(response, http.getStream(),
-      DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(8));
+  // Read the HTTPClient-managed body before parsing. An HTTP 200 may still
+  // deliver an empty or unexpected JSON response; do not mistake it for a reply.
+  const int declaredLength = http.getSize();
+  if (declaredLength > 8192) {
+    Serial.printf("AI chat: oversized response (%d)\n", declaredLength);
+    http.end();
+    return nullptr;
+  }
+  String responseBody = http.getString();
   http.end();
-  if (err) return nullptr;
-#if defined(LUCY_CLIPBOT_C3)
+  Serial.printf("AI chat: HTTP body length=%u\n", (unsigned)responseBody.length());
+  if (responseBody.isEmpty() || responseBody.length() > 8192) return nullptr;
+  StaticJsonDocument<128> filter;
+  filter["message"]["content"] = true;
+  DynamicJsonDocument response(2048);
+  auto err = deserializeJson(response, responseBody,
+      DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(8));
+  if (err) {
+    Serial.printf("AI chat: JSON parse failed: %s\n", err.c_str());
+    return nullptr;
+  }
   const char *content = response["message"]["content"] | nullptr;
-#else
-  const char *content = response["message"]["content"] | nullptr;
-#endif
-  if (!content || !content[0]) return nullptr;
+  if (!content || !content[0]) {
+    Serial.println("AI chat: message.content missing or empty");
+    return nullptr;
+  }
   strncpy(outBuf, content, sizeof(outBuf) - 1);
   outBuf[sizeof(outBuf) - 1] = '\0';
   pushHistory(text, outBuf);
