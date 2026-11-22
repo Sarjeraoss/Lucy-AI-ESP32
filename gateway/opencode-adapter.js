@@ -183,7 +183,7 @@ const server = http.createServer(async (req,res)=>{
   if(req.method==='GET' && url.pathname==='/tts'){
     if(typeof req.headers['x-clipbot-token']!=='string'||!safeEq(req.headers['x-clipbot-token'],cfg.token)) return json(res,401,{error:'Unauthorized TTS'});
     const speech=url.searchParams.get('text')||'';
-    if(!speech.trim()||speech.length>180||/[\\x00-\\x1f]/.test(speech)) return json(res,400,{error:'Invalid speech text'});
+    if(!speech.trim()||speech.length>180||/[\x00-\x1f]/.test(speech)) return json(res,400,{error:'Invalid speech text'});
     if(ttsBusy) return json(res,429,{error:'TTS busy'});
     ttsBusy=true;
     try {
