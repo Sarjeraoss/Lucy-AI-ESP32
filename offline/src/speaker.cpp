@@ -133,7 +133,9 @@ void speakerTick() {
 
 bool speakerSpeakPcm16Url(const String& url, const String& token) {
 #if LUCY_I2S_DIN >= 0
-  if (!ready || volume == 0 || WiFi.status() != WL_CONNECTED) return false;
+  // A PC on Lucy-Setup can provide TTS even without router (STA) Wi-Fi.
+  if (!ready || volume == 0 ||
+      (WiFi.status() != WL_CONNECTED && WiFi.softAPgetStationNum() == 0)) return false;
   WiFiClient client;
   WiFiClientSecure secure;
   HTTPClient http;
