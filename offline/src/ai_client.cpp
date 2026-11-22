@@ -158,20 +158,48 @@ const char *requestChat(const char *text) {
     http.end();
     return nullptr;
   }
-  // Parse only message.content, with a fixed-capacity document and nesting cap.
-  // Reading the stream avoids copying an unbounded server response into a String.
-  StaticJsonDocument<128> filter;
-  filter["message"]["content"] = true;
-  DynamicJsonDocument response(2048);
-  // HTTP/1.0 avoids chunked transfer framing on the stream.
-  const auto err = deserializeJson(response, http.getStream(),
-      DeserializationOption::Filter(filter), DeserializationOption::NestingLimit(8));
+  // HTTP 200 alone does not guarantee that the adapter returned a usable answer.
+  // Read the HTTPClient-managed body before ending the request. Parsing getStream()
+  // directly can produce an empty/misaligned document on some HTTP responses.
+  constexpr int MAX_REPLY_JSON_BYTES = 8192;
+  const int declaredLength = http.getSize();
+  if (declaredLength > MAX_REPLY_JSON_BYTES) {
+    Serial.printf("AI chat: oversized response (%d bytes)\n", declaredLength);
+    http.end();
+    return nullptr;
+  }
+  const String payload = http.getString();
   http.end();
-  if (err || !response["message"]["content"].is<const char *>()) return nullptr;
-  const char *content = response["message"]["content"];
-  if (!content[0]) return nullptr;
+  Serial.printf("AI chat: HTTP body bytes=%u\n", (unsigned)payload.length());
+  if (payload.isEmpty() || payload.length() > MAX_REPLY_JSON_BYTES) {
+    Serial.println("AI chat: empty or oversized HTTP body");
+    return nullptr;
+  }
+
+  DynamicJsonDocument response(4096);
+  const auto err = deserializeJson(response, payload,
+      DeserializationOption::NestingLimit(12));
+  if (err) {
+    Serial.printf("AI chat: JSON parse error: %s\n", err.c_str());
+    return nullptr;
+  }
+
+  // Lucy's adapter returns {message:{role:"assistant",content:"..."},done:true}.
+  // Support common alternate response envelopes for compatibility.
+  const char *content = response["message"]["content"] | (const char *)nullptr;
+  if (!content || !content[0])
+    content = response["choices"][0]["message"]["content"] | (const char *)nullptr;
+  if (!content || !content[0])
+    content = response["response"] | (const char *)nullptr;
+  if (!content || !content[0]) {
+    Serial.printf("AI chat: no text; message=%d choices=%d response=%d error=%d\n",
+      response.containsKey("message"), response.containsKey("choices"),
+      response.containsKey("response"), response.containsKey("error"));
+    return nullptr;
+  }
   strncpy(outBuf, content, sizeof(outBuf) - 1);
   outBuf[sizeof(outBuf) - 1] = '\0';
+  Serial.printf("AI chat: reply chars=%u\n", (unsigned)strlen(outBuf));
   pushHistory(text, outBuf);
   return outBuf;
 }
