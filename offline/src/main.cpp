@@ -2134,6 +2134,10 @@ void loop() {
     chatCompletedId = chatRequestId;
     Serial.print("Lucy [online]: "); Serial.println(completedReply);
 #if defined(LUCY_CLIPBOT_C3)
+    // Show each completed online reply on the physical SH1106 OLED,
+    // even if Lucy was previously displaying the animated home screen.
+    screen = Screen::COMPANION;
+    lastInteraction = millis();
     clipbotQueueSpeech(completedReply);
 #endif
     if (screen == Screen::COMPANION) showCompanion();
