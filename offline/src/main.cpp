@@ -1633,6 +1633,59 @@ static void handleWebSay() {
   if (text.isEmpty()) { webServer.send(400, "text/plain", "empty"); return; }
   if (text.length() > 160) { webServer.send(400, "text/plain", "Use at most 160 characters."); return; }
   if (chatPending || aiBusy()) { webServer.send(409, "text/plain", "Lucy is thinking."); return; }
+
+#if defined(LUCY_CLIPBOT_C3)
+  // Local hardware commands must not be forwarded to the AI server.
+  // Examples: "volume", "volume 70", "set volume to 70".
+  String command = text;
+  command.toLowerCase();
+  command.trim();
+  bool volumeCommand = command == "volume" || command.startsWith("volume ") ||
+                       command.startsWith("set volume ");
+  if (volumeCommand) {
+    String value = command;
+    if (value.startsWith("set volume ")) value.remove(0, 11);
+    else if (value.startsWith("volume ")) value.remove(0, 7);
+    else value = "";
+    value.trim();
+    if (value.startsWith("to ")) { value.remove(0, 3); value.trim(); }
+    if (value.endsWith("%")) { value.remove(value.length() - 1); value.trim(); }
+    bool valid = value.length() > 0 && value.length() <= 3;
+    for (size_t i = 0; i < value.length(); ++i) {
+      if (!isDigit(value[i])) valid = false;
+    }
+    if (!value.isEmpty() && (!valid || value.toInt() > 100)) {
+      webServer.send(400, "text/plain", "Use volume 0 to 100.");
+      return;
+    }
+    if (!value.isEmpty()) {
+      volume = static_cast<uint8_t>(value.toInt());
+      soundEnabled = volume > 0;
+      speakerVolume(volume);
+      saveSettings();
+    }
+    char reply[100];
+    snprintf(reply, sizeof(reply), "Speaker volume: %u%%. Digital PCM gain: %.1f%%.",
+             volume, static_cast<double>(volume) / 2.0);
+    lastReplyFromModel = false;
+    lastReplyFromOffline = false;
+    setChat(text.c_str(), reply);
+    chatCompletedId = ++chatRequestId;
+    screen = Screen::COMPANION;
+    lastInteraction = millis();
+    showCompanion();
+    StaticJsonDocument<256> doc;
+    doc["status"] = "done";
+    doc["source"] = "local_command";
+    doc["reply"] = reply;
+    doc["id"] = chatCompletedId;
+    String result;
+    serializeJson(doc, result);
+    webServer.send(200, "application/json; charset=utf-8", result);
+    Serial.printf("Clipbot: volume %u%% via Lucy chat\n", volume);
+    return;
+  }
+#endif
   markovLearn(text.c_str()); // same learning path as the serial console
 
   ChatStartResult r = startChatRequest(text.c_str(), false);
