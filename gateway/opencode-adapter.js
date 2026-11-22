@@ -32,7 +32,17 @@ if (!cfg.opencodePass) { console.error('[config] OPENCODE_SERVER_PASSWORD missin
 function safeEq(a,b){ if(!a||!b) return false; const A=Buffer.from(String(a)),B=Buffer.from(String(b)); if(A.length!==B.length) return false; return crypto.timingSafeEqual(A,B); }
 function getToken(req){ const h=req.headers['x-lucy-token']; if(typeof h==='string'&&h) return h.trim(); const a=req.headers.authorization||''; return a.toLowerCase().startsWith('bearer ')?a.slice(7).trim():''; }
 function readBody(req){ return new Promise((res,rej)=>{ let n=0,buf=[]; req.on('data',c=>{ n+=c.length; if(n>cfg.maxBodyBytes){req.destroy();rej(Object.assign(new Error('too large'),{status:413})); return;} buf.push(c); }); req.on('end',()=>res(Buffer.concat(buf).toString('utf8'))); req.on('error',rej); }); }
-function json(res,status,obj){ const b=JSON.stringify(obj); res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}); res.end(b); }
+function json(res,status,obj){
+  const b=Buffer.from(JSON.stringify(obj), 'utf8');
+  res.writeHead(status,{
+    'Content-Type':'application/json; charset=utf-8',
+    'Cache-Control':'no-store',
+    'X-Content-Type-Options':'nosniff',
+    'Content-Length': String(b.length),
+    'Connection':'close'
+  });
+  res.end(b);
+}
 function log(...a){ console.log(`[${new Date().toISOString()}]`,...a); }
 
 function basic(){ return 'Basic '+Buffer.from(cfg.opencodeUser+':'+cfg.opencodePass).toString('base64'); }
@@ -44,6 +54,39 @@ async function oc(pathname, init={}){
   return d;
 }
 function parseModel(m){ if(!m) return undefined; if(typeof m==='object') return m; const i=m.indexOf('/'); return i>0?{providerID:m.slice(0,i),modelID:m.slice(i+1)}:undefined; }
+function cleanReplyText(s){ return typeof s==='string'?s.replace(/\r\n/g,'\n').trim():''; }
+function extractReply(data){
+  if (typeof data === 'string') return cleanReplyText(data);
+  if (!data || typeof data !== 'object') return '';
+  const parts = Array.isArray(data.parts) ? data.parts : [];
+  const textParts = [];
+  for (const p of parts) {
+    if (!p || typeof p !== 'object') continue;
+    if (p.type === 'text' || p.type === 'output_text') {
+      const t = cleanReplyText(p.text || p.content);
+      if (t) textParts.push(t);
+    }
+  }
+  if (textParts.length) return textParts.join('\n').trim();
+  const candidates = [
+    data.message && data.message.content,
+    data.output_text,
+    data.text,
+    data.response,
+    data.content
+  ];
+  for (const c of candidates) {
+    const t = cleanReplyText(c);
+    if (t) return t;
+  }
+  for (const p of parts) {
+    if (!p || typeof p !== 'object') continue;
+    if (['reasoning','tool','tool-call','tool-result','step-start','step-finish','patch','file'].includes(p.type)) continue;
+    const t = cleanReplyText(p.text || p.content);
+    if (t) return t;
+  }
+  return '';
+}
 function loadSession(){ try { return fs.readFileSync(cfg.sessionFile,'utf8').trim(); } catch { return ''; } }
 function saveSession(id){ try { fs.writeFileSync(cfg.sessionFile,id,'utf8'); } catch {} }
 async function ensureSession(signal){
@@ -88,11 +131,13 @@ async function promptSession(sessionID, text, signal){
     });
     const raw = await r.text(); let data; try{data=JSON.parse(raw);}catch{data=raw;}
     if(!r.ok) throw Object.assign(new Error(`opencode ${r.status}`),{status:r.status,detail:data});
-    const parts = (data && data.parts) || [];
-    const textParts = parts.filter(p=>p && p.type==='text' && typeof p.text==='string').map(p=>p.text.trim()).filter(Boolean);
-    const reply = textParts.join('\n').trim();
-    if(data && data.info && data.info.error) throw Object.assign(new Error('opencode message error'),{status:502});
-    if(!reply) throw Object.assign(new Error('empty reply'),{status:502});
+    if(data && data.info && data.info.error) throw Object.assign(new Error('opencode message error'),{status:502,detail:data.info.error});
+    const reply = extractReply(data);
+    if(!reply) {
+      const types = Array.isArray(data && data.parts) ? data.parts.map(p=>p && p.type).filter(Boolean) : [];
+      log('empty reply parts', types.join(',') || 'none');
+      throw Object.assign(new Error('empty reply'), {status:502, detail:{reason:'empty assistant text', partTypes:types}});
+    }
     return reply.slice(0,700);
   }
 }
@@ -136,17 +181,20 @@ const server = http.createServer(async (req,res)=>{
       sid = await ensureSession(ctl.signal);
       const text = buildPrompt(msgs);
       const reply = await promptSession(sid, text, ctl.signal);
-      log('chat ok', reply.length, 'chars');
-      if (url.pathname==='/chat') return json(res,200,{reply,model:cfg.agent});
-      return json(res,200,{model:cfg.agent,created_at:new Date().toISOString(),message:{role:'assistant',content:reply},done:true,done_reason:'stop'});
+      const out = url.pathname==='/chat'
+        ? {reply,model:cfg.agent}
+        : {model:cfg.agent,created_at:new Date().toISOString(),message:{role:'assistant',content:reply},done:true,done_reason:'stop'};
+      log('chat ok', reply.length, 'chars', 'ct=application/json');
+      return json(res,200,out);
     } catch(e) {
       const timedOut = ctl.signal.aborted;
-      log('chat err', backendFailure || (timedOut?'deadline or disconnect':e.message), 'elapsedMs='+ (Date.now()-started));
+      const msg = backendFailure || (timedOut?'deadline or disconnect':e.message);
+      log('chat err', msg, 'elapsedMs='+ (Date.now()-started));
       if(timedOut && sid) {
         try { await oc(`/session/${encodeURIComponent(sid)}/abort`, {method:'POST', signal:AbortSignal.timeout(2000)}); } catch {}
       }
-      const status = backendFailure?503:(timedOut?504:502);
-      return json(res,status,{error:backendFailure || 'Lucy backend unavailable'});
+      const status = backendFailure?503:(timedOut?504:(e.status && e.status>=400 && e.status<600 ? e.status : 502));
+      return json(res,status,{error:backendFailure || 'Lucy backend unavailable', detail:msg});
     } finally { clearInterval(monitor); clearTimeout(timer); res.off('close',disconnected); busy--; }
   }
   return json(res,404,{error:'Not found'});

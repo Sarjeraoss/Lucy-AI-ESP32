@@ -86,6 +86,7 @@ uint8_t menuIndex = 0;
 uint8_t gameIndex = 0;
 uint32_t lastInteraction = 0;
 uint32_t lastFrame = 0;
+constexpr uint32_t CHAT_PENDING_TIMEOUT_MS = 45000;
 uint32_t lastClockSync = 0;
 #if defined(LUCY_CLIPBOT_C3)
 // Low-duty-cycle synthetic cat voice; no microphone or general speech synthesis.
@@ -134,7 +135,7 @@ const char *languageName(Language value) {
 }
 
 // ===========================================================================
-// THEME — the 1-bit "premium" OLED look.
+// THEME â€” the 1-bit "premium" OLED look.
 //
 // The SSD1306 is a 128x64 monochrome panel driven by a fixed ASCII bitmap font:
 // there is no Unicode/emoji glyph set on the device, so sending a real emoji
@@ -151,12 +152,12 @@ const char *languageName(Language value) {
 
 // Type system. The old 5x7/6x10 bitmap faces are cramped and harsh on a 1-bit
 // panel; U8g2's proportional Helvetica is smoother, spaces naturally, and still
-// fits 128px. Only these faces are used anywhere in the firmware — change a
+// fits 128px. Only these faces are used anywhere in the firmware â€” change a
 // macro here rather than a call site.
 //
-//   FONT_TITLE  bold sans — section headers and the selected row (weight = hierarchy)
-//   FONT_BODY   regular sans — content lines, list rows
-//   FONT_META   regular sans 8px — hints, badges, bubble text, secondary values
+//   FONT_TITLE  bold sans â€” section headers and the selected row (weight = hierarchy)
+//   FONT_BODY   regular sans â€” content lines, list rows
+//   FONT_META   regular sans 8px â€” hints, badges, bubble text, secondary values
 //   FONT_BIG    geometric sans display face for the clock digits
 //
 // Both body faces are 8px: with Helvetica, weight and letter-spacing carry the
@@ -489,8 +490,15 @@ void drawStatusBar(bool withBrand, bool withTime) {
 // Companion chat state, mirrored by serial console, web console and buttons.
 // ---------------------------------------------------------------------------
 char chatUser[96] = "";
-char chatReply[192] = "";
-bool lastReplyFromModel = false;
+char chatReply[96] = "Ask me something, I am here.";
+volatile bool lastReplyFromModel = false;
+volatile bool lastReplyFromOffline = false;
+volatile bool chatPending = false;
+char chatPendingUser[96] = "";
+uint32_t chatRequestId = 0;
+uint32_t chatCompletedId = 0;
+uint32_t chatPendingSince = 0;
+char chatError[96] = "";
 uint8_t chatIcon = ICON_SPARK;
 
 uint8_t iconForReply(const char *reply) {
@@ -804,25 +812,29 @@ void showCompanion(const char *message = nullptr) {
     drawCentered(message, 30);
     display.setFont(FONT_META);
     drawCentered("SEL for a demo reply", 44);
+  } else if (chatPending) {
+    display.setFont(FONT_META);
+    char you[72];
+    snprintf(you, sizeof(you), "you: %s", chatPendingUser[0] ? chatPendingUser : chatUser);
+    drawStrFit(3, 20, you, 122);
+    drawIcon(ICON_CLOUD, 3, 23, 1);
+    drawBubble(13, 22, 112, "Lucy is thinking...", 2);
   } else if (!hasChat) {
     drawFace(64, 24, MOOD_HAPPY, (millis() % 4700U) < 140U);
     display.setFont(FONT_META);
     drawCentered("Say hello", 51);
   } else {
-    // The reply is the hero; the question above it stays one clipped line.
     display.setFont(FONT_META);
     char you[72];
     snprintf(you, sizeof(you), "you: %s", chatUser);
     drawStrFit(3, 20, you, 122);
-    drawIcon(lastReplyFromModel ? ICON_CLOUD : ICON_SMILE, 3, 23, 1);
+    drawIcon(lastReplyFromModel ? ICON_CLOUD : (lastReplyFromOffline ? ICON_SLIDERS : ICON_SMILE), 3, 23, 1);
     drawBubble(13, 22, 112, chatReply, 3);
   }
   display.setFont(FONT_META);
-  if (!message && hasChat) {
-    display.drawStr(3, 62, lastReplyFromModel ? "from cloud" : "offline brain");
-  } else if (!message) {
-    display.drawStr(3, 62, "UP lang SEL demo");
-  }
+  if (chatPending) display.drawStr(3, 62, "waiting for AI");
+  else if (!message && hasChat) display.drawStr(3, 62, lastReplyFromModel ? "online AI" : (lastReplyFromOffline ? "offline fallback" : "offline brain"));
+  else if (!message) display.drawStr(3, 62, "UP lang SEL demo");
   display.drawStr(125 - display.getStrWidth("BACK"), 62, "BACK");
   display.sendBuffer();
 }
@@ -1102,24 +1114,13 @@ static const char *replyForIntent(int intent) {
   }
 }
 
-const char *offlineReply(const char *input) {
+const char *offlineLocalReply(const char *input) {
   static char normalized[96];
-  lastReplyFromModel = false;
   size_t n = strlen(input);
   if (n >= sizeof(normalized)) n = sizeof(normalized) - 1;
   for (size_t i = 0; i < n; i++) normalized[i] = static_cast<char>(tolower(static_cast<unsigned char>(input[i])));
   normalized[n] = '\0';
 
-#if defined(LUCY_CLIPBOT_C3)
-  // The Cloudflare Worker is Clipbot's online brain.
-  if (aiEnabled) {
-    const char *reply = aiReply(input);
-    if (reply != nullptr) {
-      lastReplyFromModel = true;
-      return reply;
-    }
-  }
-#endif
   // Self-learning generator is always local and always wins.
   if (textHasWord(normalized, "generate") || textHasWord(normalized, "invent") ||
       strstr(normalized, "make words") || strstr(normalized, "new words") ||
@@ -1137,18 +1138,6 @@ const char *offlineReply(const char *input) {
   if (strncmp(normalized, "brain", 5) == 0) {
     return "Use the serial console for brain commands: brain stats, save, reset.";
   }
-
-#if !defined(LUCY_CLIPBOT_C3)
-  // Other Lucy targets retain their existing Ollama-compatible transport.
-  if (aiEnabled) {
-    const char *ai = aiReply(input);
-    if (ai != nullptr) {
-      lastReplyFromModel = true;
-      return ai;
-    }
-  }
-
-#endif
   if (strstr(normalized, "hello") || textHasWord(normalized, "hi") || textHasWord(normalized, "hey") || strstr(normalized, "namaste") || strstr(normalized, "namaskar")) {
     if (language == Language::HINDI) return "Namaste! Aap kaise hain?";
     if (language == Language::MARATHI) return "Namaskar! Kase aahat?";
@@ -1159,7 +1148,7 @@ const char *offlineReply(const char *input) {
     if (language == Language::MARATHI) return "Mi chhan aahe! Tumhi kase?";
     return "I am doing great! How are you?";
   }
-  if (strstr(normalized, "bored") || strstr(normalized, "boring") || strstr(normalized, " कंटाळा")) return "Let's play a game together!";
+  if (strstr(normalized, "bored") || strstr(normalized, "boring") || strstr(normalized, " à¤•à¤‚à¤Ÿà¤¾à¤³à¤¾")) return "Let's play a game together!";
   if (strstr(normalized, "joke")) return "Why did the computer get cold? It left its Windows open!";
   if (textHasWord(normalized, "name")) return "I am Lucy, your offline little companion.";
   if (textHasWord(normalized, "thank") || textHasWord(normalized, "thanks") || textHasWord(normalized, "thx")) return "You are always welcome!";
@@ -1175,6 +1164,59 @@ const char *offlineReply(const char *input) {
   if (language == Language::HINDI) return "Main abhi offline hoon. Thoda aur bataiye!";
   if (language == Language::MARATHI) return "Mi offline aahe. Jara adhik sanga!";
   return "I am here! Try hello, joke, time, or how are you.";
+}
+
+enum ChatStartResult : uint8_t { CHAT_STARTED = 0, CHAT_BUSY, CHAT_INVALID, CHAT_OFFLINE_FALLBACK };
+
+static const char *chatStartError(ChatStartResult r) {
+  switch (r) {
+    case CHAT_BUSY: return "Lucy is thinking.";
+    case CHAT_INVALID: return "Invalid request.";
+    case CHAT_OFFLINE_FALLBACK: return "Offline fallback.";
+    default: return "OK";
+  }
+}
+
+ChatStartResult startChatRequest(const char *input, bool allowOfflineFallback) {
+  if (!input || !*input) return CHAT_INVALID;
+  if (chatPending || aiBusy()) return CHAT_BUSY;
+  chatError[0] = '\0';
+  lastReplyFromModel = false;
+  lastReplyFromOffline = false;
+  strncpy(chatPendingUser, input, sizeof(chatPendingUser) - 1);
+  chatPendingUser[sizeof(chatPendingUser) - 1] = '\0';
+  chatCompletedId = ++chatRequestId;
+  chatPendingSince = millis();
+
+  if (aiEnabled) {
+    AiRequestResult r = aiRequestChat(input);
+    if (r == AI_REQ_STARTED) {
+      chatPending = true;
+      return CHAT_STARTED;
+    }
+    snprintf(chatError, sizeof(chatError), "%s", aiLastError()[0] ? aiLastError() : "AI unavailable");
+    Serial.printf("AI chat: start failed (%d) %s\n", (int)r, chatError);
+  } else {
+    snprintf(chatError, sizeof(chatError), "AI disabled");
+  }
+
+  if (allowOfflineFallback) {
+    const char *reply = offlineLocalReply(input);
+    lastReplyFromOffline = true;
+    lastReplyFromModel = false;
+    chatPending = false;
+    setChat(input, reply);
+    return CHAT_OFFLINE_FALLBACK;
+  }
+
+  chatPending = false;
+  return CHAT_OFFLINE_FALLBACK;
+}
+
+const char *offlineReply(const char *input) {
+  ChatStartResult r = startChatRequest(input, true);
+  if (r == CHAT_STARTED) return "Lucy is thinking...";
+  return chatReply;
 }
 
 void handleRtcSetCommand(const char *line);
@@ -1268,6 +1310,7 @@ void handleAiCommand(const char *line) {
   } else if (strcmp(line, "AI on") == 0) {
     aiEnabled = true;
     aiClearRetry();
+    aiReset();
     saveSettings();
 #if defined(LUCY_CLIPBOT_C3)
     Serial.println("AI on: configured bridge enabled, local fallback if unavailable.");
@@ -1276,6 +1319,7 @@ void handleAiCommand(const char *line) {
 #endif
   } else if (strcmp(line, "AI off") == 0) {
     aiEnabled = false;
+    aiReset();
     saveSettings();
     Serial.println("AI: off. Using the built-in offline brain.");
   } else if (strncmp(line, "AI url ", 7) == 0) {
@@ -1461,15 +1505,22 @@ void handleSerialConsole() {
         } else {
           Serial.print("You: "); Serial.println(serialLine);
           markovLearn(serialLine);           // every message teaches the generator
-          const char *reply = offlineReply(serialLine);
-          setChat(serialLine, reply);
-          Serial.print("Lucy: "); Serial.println(reply);
+          ChatStartResult r = startChatRequest(serialLine, false);
+          if (r == CHAT_STARTED) {
+            setChat(serialLine, "Lucy is thinking...");
+            Serial.println("Lucy: (thinking... online AI)");
+          } else {
+            const char *fallback = offlineLocalReply(serialLine);
+            lastReplyFromModel = false; lastReplyFromOffline = true; chatPending = false;
+            setChat(serialLine, fallback);
+            Serial.print("Lucy [offline fallback]: "); Serial.println(fallback);
 #if defined(LUCY_CLIPBOT_C3)
+            clipbotQueueSpeech(fallback);
+#endif
+          }
           screen = Screen::COMPANION;
           lastInteraction = millis();
-          clipbotQueueSpeech(reply);
-#endif
-          if (screen == Screen::COMPANION) showCompanion();
+          showCompanion();
         }
       }
       serialLength = 0;
@@ -1533,13 +1584,25 @@ render(new Uint8Array(1024));
 document.getElementById('up').onclick=function(){fetch('/press?btn=up');};
 document.getElementById('select').onclick=function(){fetch('/press?btn=select');};
 document.getElementById('back').onclick=function(){fetch('/press?btn=back');};
-form.onsubmit=function(e){e.preventDefault();var t=msg.value.trim();if(!t)return;say('You',t);msg.value='';fetch('/say?text='+encodeURIComponent(t)).then(async function(r){while(r.status===202){await new Promise(function(resolve){setTimeout(resolve,250);});r=await fetch('/chat-result');}if(!r.ok)throw Error('busy');return r.text();}).then(function(t){say('Lucy',t);}).catch(function(){say('Lucy','(no reply)');});};
-</script>
+async function pollResult(id){for(var i=0;i<180;i++){await new Promise(function(r){setTimeout(r,350);});var r=await fetch('/chat-result?json=1&id='+encodeURIComponent(id||''),{cache:'no-store'});var ct=r.headers.get('content-type')||'';if(r.status===202){continue;}if(ct.indexOf('application/json')>=0){var j=await r.json();if(j.status==='pending')continue;return j;}var tx=await r.text();return {status:'done',source:'offline',error:'',reply:tx,id:0};}return {status:'done',source:'offline_fallback',error:'timeout',reply:'Request timed out. Please try again.',id:0};}
+form.onsubmit=async function(e){e.preventDefault();var t=msg.value.trim();if(!t||form.dataset.busy==='1')return;form.dataset.busy='1';msg.value='';say('You',t);try{var r=await fetch('/say?text='+encodeURIComponent(t),{cache:'no-store'});var ct=r.headers.get('content-type')||'';var j=ct.indexOf('application/json')>=0?await r.json():{status:r.status===202?'pending':'done',source:'offline',error:'',reply:await r.text(),id:0};if(r.status===409){say('Lucy','[busy] '+(j.reply||'Lucy is thinking.'));return;}if(r.status===202||j.status==='pending'){say('Lucy','[thinking] waiting for online AI...');j=await pollResult(j.id);}var src=j&&j.source?j.source:'';var prefix=src==='online'?'[online AI] ':src==='offline_fallback'?'[offline fallback] ':'[offline] ';var err=j&&j.error&&src!=='online'?(' ('+j.error+')'):'';say('Lucy',prefix+(j&&j.reply?j.reply:'(no reply)')+err);}catch(err){say('Lucy','[offline fallback] request failed');}finally{form.dataset.busy='0';}};</script>
 </body></html>)HTML";
 
 static void handleChatResult() {
-  if (aiBusy()) { webServer.send(202,"text/plain",""); return; }
-  webServer.send(200,"text/plain; charset=utf-8",chatReply);
+  if (chatPending || aiBusy()) { webServer.send(202, "application/json; charset=utf-8", "{\"status\":\"pending\"}"); return; }
+  char body[320];
+  const char *src = lastReplyFromModel ? "online" : (lastReplyFromOffline ? "offline_fallback" : "offline");
+  const char *err = chatError[0] ? chatError : "";
+  snprintf(body, sizeof(body), "{\"status\":\"done\",\"source\":\"%s\",\"error\":\"%s\",\"reply\":\"", src, err);
+  // reply is plain text in chatReply; keep simple for web console by returning text endpoints separately below.
+  if (webServer.hasArg("json")) {
+    String json = String("{\"status\":\"done\",\"source\":\"") + src + "\",\"error\":\"" + err + "\",\"reply\":";
+    StaticJsonDocument<384> doc; doc["status"]="done"; doc["source"]=src; doc["error"]=err; doc["reply"]=chatReply; doc["id"]=chatCompletedId;
+    String out; serializeJson(doc, out);
+    webServer.send(200, "application/json; charset=utf-8", out);
+    return;
+  }
+  webServer.send(200, "text/plain; charset=utf-8", chatReply);
 }
 static void handleWebRoot() { webServer.send_P(200, "text/html; charset=utf-8", WEB_PAGE); }
 
@@ -1562,19 +1625,40 @@ static void handleWebPress() {
 }
 
 static void handleWebSay() {
-  if (aiBusy()) { webServer.send(409, "text/plain", "Lucy is thinking."); return; }
   String text = webServer.arg("text");
   text.trim();
   if (text.isEmpty()) { webServer.send(400, "text/plain", "empty"); return; }
   if (text.length() > 160) { webServer.send(400, "text/plain", "Use at most 160 characters."); return; }
+  if (chatPending || aiBusy()) { webServer.send(409, "text/plain", "Lucy is thinking."); return; }
   markovLearn(text.c_str()); // same learning path as the serial console
-  const char *reply = offlineReply(text.c_str());
-  setChat(text.c_str(), reply);
-  webServer.send(aiBusy()?202:200, "text/plain; charset=utf-8", reply);
+
+  ChatStartResult r = startChatRequest(text.c_str(), false);
+  if (r == CHAT_STARTED) {
+    setChat(text.c_str(), "Lucy is thinking...");
+    webServer.send(202, "application/json; charset=utf-8", String("{\"status\":\"pending\",\"id\":") + chatCompletedId + "}");
+    if (screen == Screen::COMPANION) showCompanion();
+    return;
+  }
+  if (r == CHAT_BUSY) { webServer.send(409, "text/plain", "Lucy is thinking."); return; }
+
+  // AI unavailable/failure at start: clearly labeled offline fallback.
+  const char *fallback = offlineLocalReply(text.c_str());
+  lastReplyFromModel = false;
+  lastReplyFromOffline = true;
+  chatPending = false;
+  setChat(text.c_str(), fallback);
+  StaticJsonDocument<320> doc;
+  doc["status"] = "done";
+  doc["source"] = "offline_fallback";
+  doc["error"] = chatError;
+  doc["reply"] = fallback;
+  doc["id"] = chatCompletedId;
+  String out; serializeJson(doc, out);
+  webServer.send(200, "application/json; charset=utf-8", out);
 #if defined(LUCY_CLIPBOT_C3)
   screen = Screen::COMPANION;
   lastInteraction = millis();
-  clipbotQueueSpeech(reply);
+  clipbotQueueSpeech(fallback);
 #endif
   if (screen == Screen::COMPANION) showCompanion();
 }
@@ -2039,14 +2123,43 @@ void handleRtcSetCommand(const char *line) {
 
 void loop() {
   const char *completedText = nullptr;
-  const char *completedReply = aiPollReply(&completedText);
-  if (completedReply) {
+  const char *completedReply = nullptr;
+  AiReplyStatus aiSt = aiPollResult(&completedText, &completedReply);
+  if (aiSt == AI_REPLY_OK) {
+    chatPending = false;
     lastReplyFromModel = true;
+    lastReplyFromOffline = false;
+    chatError[0] = '\0';
     setChat(completedText, completedReply);
-    Serial.print("Lucy: "); Serial.println(completedReply);
+    chatCompletedId = chatRequestId;
+    Serial.print("Lucy [online]: "); Serial.println(completedReply);
 #if defined(LUCY_CLIPBOT_C3)
     clipbotQueueSpeech(completedReply);
 #endif
+    if (screen == Screen::COMPANION) showCompanion();
+  } else if (aiSt == AI_REPLY_ERROR) {
+    chatPending = false;
+    lastReplyFromModel = false;
+    lastReplyFromOffline = true;
+    snprintf(chatError, sizeof(chatError), "%s", aiLastError()[0] ? aiLastError() : "AI failed");
+    const char *fallback = offlineLocalReply(completedText ? completedText : chatPendingUser);
+    setChat(completedText ? completedText : chatPendingUser, fallback);
+    chatCompletedId = chatRequestId;
+    Serial.printf("Lucy [offline fallback] err=%s\n", chatError);
+#if defined(LUCY_CLIPBOT_C3)
+    clipbotQueueSpeech(fallback);
+#endif
+    if (screen == Screen::COMPANION) showCompanion();
+  } else if (chatPending && chatPendingSince && (millis() - chatPendingSince > CHAT_PENDING_TIMEOUT_MS)) {
+    chatPending = false;
+    lastReplyFromModel = false;
+    lastReplyFromOffline = true;
+    snprintf(chatError, sizeof(chatError), "timeout");
+    const char *fallback = offlineLocalReply(chatPendingUser);
+    setChat(chatPendingUser, fallback);
+    chatCompletedId = chatRequestId;
+    Serial.println("Lucy [offline fallback] timeout");
+    aiClearRetry();
     if (screen == Screen::COMPANION) showCompanion();
   }
   pollButton(btnUp);
@@ -2085,7 +2198,11 @@ void loop() {
     else if (millis() - lastFrame > 500) { lastFrame = millis(); showClock(); }
   } else if (screen == Screen::COMPANION) {
     if (take(btnUp)) { language = static_cast<Language>((static_cast<uint8_t>(language) + 1) % 3); saveSettings(); showCompanion(languageName(language)); }
-    if (take(btnSelect)) showCompanion(offlineReply("hello"));
+    if (take(btnSelect) && !chatPending && !aiBusy()) {
+      ChatStartResult r = startChatRequest("hello", false);
+      if (r == CHAT_STARTED) { setChat("hello", "Lucy is thinking..."); showCompanion(); }
+      else { lastReplyFromOffline = true; setChat("hello", offlineLocalReply("hello")); showCompanion(); }
+    }
     if (take(btnBack)) { screen = Screen::HOME; showHome(); }
   } else if (screen == Screen::GAMES) {
     if (take(btnUp)) { gameIndex = (gameIndex + 1) % 3; }
