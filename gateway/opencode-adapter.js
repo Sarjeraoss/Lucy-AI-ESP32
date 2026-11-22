@@ -142,10 +142,58 @@ async function promptSession(sessionID, text, signal){
   }
 }
 
+
+const os = require('node:os');
+const {spawn} = require('node:child_process');
+function speechWavToPcm(wav) {
+  if(wav.length<44||wav.toString('ascii',0,4)!=='RIFF'||wav.toString('ascii',8,12)!=='WAVE') throw Error('Invalid WAV output');
+  let pos=12, fmt, audio;
+  while(pos+8<=wav.length){
+    const type=wav.toString('ascii',pos,pos+4), size=wav.readUInt32LE(pos+4), start=pos+8;
+    if(start+size>wav.length) throw Error('Truncated WAV output');
+    if(type==='fmt '&&size>=16) fmt=[wav.readUInt16LE(start),wav.readUInt16LE(start+2),wav.readUInt32LE(start+4),wav.readUInt16LE(start+14)];
+    if(type==='data') audio=wav.subarray(start,start+size);
+    pos=start+size+(size%2);
+  }
+  if(!fmt||fmt.join(',')!=='1,1,16000,16'||!audio?.length||audio.length%2) throw Error('Expected 16 kHz mono signed 16-bit PCM');
+  return audio;
+}
+async function generateLucySpeech(text){
+  if(process.platform!=='win32') throw Error('Built-in SAPI requires a Windows PC');
+  const output=path.join(os.tmpdir(),'lucy-'+crypto.randomUUID()+'.wav');
+  try {
+    await new Promise((resolve,reject)=>{
+      const script=path.join(__dirname,'sapi-tts.ps1'), encoded=Buffer.from(text,'utf8').toString('base64');
+      const child=spawn('powershell.exe',['-NoProfile','-NonInteractive','-STA','-ExecutionPolicy','Bypass','-File',script,'-EncodedText',encoded,'-OutputFile',output],{windowsHide:true,stdio:['ignore','ignore','pipe']});
+      let err='',settled=false;
+      const timer=setTimeout(()=>child.kill(),25000);
+      child.stderr.on('data',c=>{if(err.length<800)err+=c.toString()});
+      child.once('error',e=>{if(settled)return;settled=true;clearTimeout(timer);reject(e)});
+      child.once('close',code=>{if(settled)return;settled=true;clearTimeout(timer);code===0?resolve():reject(Error('SAPI error: '+err.slice(0,150)))});
+    });
+    return speechWavToPcm(await fs.promises.readFile(output));
+  } finally { await fs.promises.unlink(output).catch(()=>{}); }
+}
+let ttsBusy=false;
+
 let busy = 0;
 const server = http.createServer(async (req,res)=>{
   const url = new URL(req.url,'http://localhost');
   if (req.method==='GET' && (url.pathname==='/'||url.pathname==='/health')) return json(res,200,{ok:true,service:'lucy-opencode-adapter',busy,agent:cfg.agent});
+  if(req.method==='GET' && url.pathname==='/tts'){
+    if(typeof req.headers['x-clipbot-token']!=='string'||!safeEq(req.headers['x-clipbot-token'],cfg.token)) return json(res,401,{error:'Unauthorized TTS'});
+    const speech=url.searchParams.get('text')||'';
+    if(!speech.trim()||speech.length>180||/[\\x00-\\x1f]/.test(speech)) return json(res,400,{error:'Invalid speech text'});
+    if(ttsBusy) return json(res,429,{error:'TTS busy'});
+    ttsBusy=true;
+    try {
+      const pcm=await generateLucySpeech(speech);
+      if(pcm.length>1024000) return json(res,413,{error:'Speech too long'});
+      res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Length':String(pcm.length),'Connection':'close','Cache-Control':'no-store'});
+      return res.end(pcm);
+    } catch(e){log('TTS error',e.message);return json(res,502,{error:'TTS error',detail:e.message});}
+    finally{ttsBusy=false;}
+  }
   if (req.method==='GET' && url.pathname==='/api/tags') {
     if(!safeEq(getToken(req),cfg.token)) return json(res,401,{error:'Unauthorized'});
     const name = typeof cfg.model==='string'?cfg.model:(cfg.model?`${cfg.model.providerID}/${cfg.model.modelID}`:'opencode/default');
